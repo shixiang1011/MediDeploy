@@ -75,6 +75,9 @@ def fail(db, task: Deployment, message: str) -> None:
 def call_ansible(task_id: str, package_path: str, config: dict, hosts: list[Host]) -> int:
     with tempfile.TemporaryDirectory(prefix="spmp-") as temp_dir:
         root = Path(temp_dir)
+        known_hosts_path = Path(settings().packages_dir) / ".ssh_known_hosts"
+        known_hosts_path.touch(mode=0o600, exist_ok=True)
+        os.chmod(known_hosts_path, 0o600)
         inventory = {"all": {"children": {"redis": {"hosts": {}}}}}
         for host in hosts:
             key_path = root / f"key-{host.id}"
@@ -82,7 +85,11 @@ def call_ansible(task_id: str, package_path: str, config: dict, hosts: list[Host
             os.chmod(key_path, 0o600)
             inventory["all"]["children"]["redis"]["hosts"][host.name] = {
                 "ansible_host": host.address, "ansible_port": host.ssh_port, "ansible_user": host.ssh_user,
-                "ansible_ssh_private_key_file": str(key_path), "ansible_become": True, "ansible_become_method": "sudo"
+                "ansible_ssh_private_key_file": str(key_path), "ansible_become": True, "ansible_become_method": "sudo",
+                "ansible_ssh_common_args": (
+                    "-o StrictHostKeyChecking=accept-new "
+                    f"-o UserKnownHostsFile={known_hosts_path}"
+                ),
             }
         (root / "inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
         config["redis_password"] = decrypt(config["redis_password"])
@@ -94,7 +101,16 @@ def call_ansible(task_id: str, package_path: str, config: dict, hosts: list[Host
         vars_file = root / "vars.json"
         vars_file.write_text(json.dumps(extra_vars), encoding="utf-8")
         command = ["ansible-playbook", "-i", str(root / "inventory.json"), str(Path(settings().ansible_dir) / "playbooks" / "redis_cluster.yml"), "--extra-vars", f"@{vars_file}"]
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        process_env = os.environ.copy()
+        process_env["ANSIBLE_ROLES_PATH"] = str(Path(settings().ansible_dir) / "roles")
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=process_env,
+        )
         assert process.stdout is not None
         for line in process.stdout:
             add_log(task_id, line.rstrip())

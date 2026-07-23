@@ -34,6 +34,13 @@ class StaticContractTests(unittest.TestCase):
         copy_index = tasks.index("Copy built Redis binaries under task-owned path")
         self.assertLess(create_index, copy_index)
 
+    def test_worker_configures_role_path_and_persistent_host_keys(self):
+        worker = (ROOT / "backend" / "app" / "worker.py").read_text(encoding="utf-8")
+        self.assertIn('process_env["ANSIBLE_ROLES_PATH"]', worker)
+        self.assertIn('Path(settings().ansible_dir) / "roles"', worker)
+        self.assertIn('Path(settings().packages_dir) / ".ssh_known_hosts"', worker)
+        self.assertIn("StrictHostKeyChecking=accept-new", worker)
+
     def test_ansible_does_not_invoke_rm(self):
         ansible_text = "\n".join(
             path.read_text(encoding="utf-8")
