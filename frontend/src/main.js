@@ -1,4 +1,7 @@
-import { createApp } from 'vue'
+// This entry uses an inline template, so it must import Vue's compiler-enabled
+// build. The default Vite Vue export is runtime-only and would mount a comment
+// node instead of rendering the application.
+import { createApp } from 'vue/dist/vue.esm-bundler.js'
 import axios from 'axios'
 import './style.css'
 
