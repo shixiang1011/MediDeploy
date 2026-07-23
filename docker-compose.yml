@@ -1,0 +1,60 @@
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-spmp}
+      MYSQL_USER: ${MYSQL_USER:-spmp}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+    command: ["mysqld", "--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER:-spmp}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-spmp}
+      PACKAGES_DIR: /opt/spmp/packages
+      ANSIBLE_DIR: /opt/spmp/ansible
+    volumes:
+      - packages-data:/opt/spmp/packages
+      - ./ansible:/opt/spmp/ansible:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  worker:
+    build: ./backend
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker"]
+    env_file: .env
+    environment:
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER:-spmp}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-spmp}
+      PACKAGES_DIR: /opt/spmp/packages
+      ANSIBLE_DIR: /opt/spmp/ansible
+    volumes:
+      - packages-data:/opt/spmp/packages
+      - ./ansible:/opt/spmp/ansible:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "${SPMP_PORT:-8080}:80"
+    depends_on:
+      - api
+
+volumes:
+  mysql-data:
+  packages-data:

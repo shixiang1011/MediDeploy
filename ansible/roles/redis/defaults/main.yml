@@ -1,0 +1,5 @@
+redis_port: 6379
+replicas: 1
+appendonly: true
+maxmemory_policy: noeviction
+custom_redis_conf: ""

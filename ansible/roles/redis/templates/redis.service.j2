@@ -1,0 +1,19 @@
+[Unit]
+Description=Redis managed by SPMP ({{ spmp_task_id }})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User={{ redis_service_user }}
+Group={{ redis_service_user }}
+ExecStart={{ redis_install_path }}/bin/redis-server {{ redis_config_path }}/redis.conf --supervised systemd
+ExecStop={{ redis_install_path }}/bin/redis-cli -a {{ redis_password }} -p {{ redis_port }} shutdown save
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
