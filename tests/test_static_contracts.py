@@ -10,7 +10,9 @@ class StaticContractTests(unittest.TestCase):
     def test_nginx_preserves_fastapi_api_prefix(self):
         config = (ROOT / "frontend" / "nginx.conf").read_text(encoding="utf-8")
         self.assertIn("location /api/", config)
-        self.assertIn("proxy_pass http://api:8000;", config)
+        self.assertIn("resolver 127.0.0.11", config)
+        self.assertIn("set $api_upstream http://api:8000;", config)
+        self.assertIn("proxy_pass $api_upstream;", config)
         self.assertNotIn("proxy_pass http://api:8000/;", config)
 
     def test_frontend_login_matches_backend_route(self):
