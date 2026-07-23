@@ -3,7 +3,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(case_sensitive=True, extra="ignore")
+    # Docker Compose conventionally injects upper-case variables such as
+    # DATABASE_URL.  Accept them without requiring duplicate lower-case keys.
+    model_config = SettingsConfigDict(case_sensitive=False, extra="ignore")
     database_url: str = "mysql+pymysql://spmp:spmp@mysql:3306/spmp"
     secret_key: str = "development-key-must-be-replaced"
     packages_dir: str = "/opt/spmp/packages"
