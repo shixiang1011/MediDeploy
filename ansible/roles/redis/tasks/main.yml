@@ -160,6 +160,14 @@
       become_user: "{{ redis_service_user }}"
 
     - name: Install built Redis binaries under task-owned path
+      ansible.builtin.file:
+        path: "{{ redis_install_path }}/bin"
+        state: directory
+        owner: "{{ redis_service_user }}"
+        group: "{{ redis_service_user }}"
+        mode: '0750'
+
+    - name: Copy built Redis binaries under task-owned path
       ansible.builtin.copy:
         src: "{{ item }}"
         dest: "{{ redis_install_path }}/bin/{{ item | basename }}"
