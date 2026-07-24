@@ -88,7 +88,11 @@ export default {
         const response = await api.request({ method, url, data: body, ...config })
         return response.data
       } catch (error) {
-        this.error = error.response?.data?.detail || error.message || '请求失败'
+        if (error.response?.status === 413) {
+          this.error = '上传文件超过网关允许的大小，请检查平台或上游代理的上传限制。'
+        } else {
+          this.error = error.response?.data?.detail || error.message || '请求失败'
+        }
         throw error
       }
     },

@@ -14,6 +14,10 @@ class StaticContractTests(unittest.TestCase):
         self.assertIn("set $api_upstream http://api:8000;", config)
         self.assertIn("proxy_pass $api_upstream;", config)
         self.assertNotIn("proxy_pass http://api:8000/;", config)
+        self.assertIn("client_max_body_size 5g;", config)
+        self.assertIn("proxy_request_buffering off;", config)
+        self.assertIn("proxy_read_timeout 3600s;", config)
+        self.assertIn("proxy_send_timeout 3600s;", config)
 
     def test_frontend_routes_match_backend(self):
         frontend = (ROOT / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
