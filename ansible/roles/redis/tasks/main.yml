@@ -38,6 +38,35 @@
     - "{{ redis_log_path }}"
     - "{{ redis_config_path }}"
 
+- name: Find restricted parent directories that require traversal ACLs
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - >-
+        import json, os, stat, sys;
+        from pathlib import Path;
+        parents = set();
+        [parents.update(str(parent) for parent in Path(raw).parents if str(parent) != '/')
+        for raw in sys.argv[1:]];
+        print(json.dumps(sorted(path for path in parents
+        if os.path.isdir(path) and not (os.stat(path).st_mode & stat.S_IXOTH))))
+      - "{{ redis_install_path }}"
+      - "{{ redis_data_path }}"
+      - "{{ redis_log_path }}"
+      - "{{ redis_config_path }}"
+  changed_when: false
+  register: redis_restricted_parent_paths
+
+- name: Grant only this Redis service user traversal on restricted parents
+  ansible.builtin.command:
+    argv:
+      - setfacl
+      - -m
+      - "u:{{ redis_service_user }}:--x"
+      - "{{ item }}"
+  loop: "{{ redis_restricted_parent_paths.stdout | from_json }}"
+
 - name: Copy uploaded package to the task-owned directory
   ansible.builtin.copy:
     src: "{{ redis_package_path }}"

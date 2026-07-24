@@ -84,6 +84,14 @@ class StaticContractTests(unittest.TestCase):
         self.assertIn("REDISCLI_AUTH", tasks)
         self.assertIn("Collect Redis application log after a verification failure", tasks)
         self.assertNotIn('host: "{{ redis_advertise_address }}"', tasks)
+        self.assertIn("setfacl", playbook)
+        self.assertIn("Grant only this Redis service user traversal", tasks)
+
+        rollback = (
+            ROOT / "ansible" / "playbooks" / "redis_rollback.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Revoke this task service user's parent traversal ACLs", rollback)
+        self.assertIn("- -x", rollback)
 
         service = (
             ROOT / "ansible" / "roles" / "redis" / "templates" / "redis.service.j2"
