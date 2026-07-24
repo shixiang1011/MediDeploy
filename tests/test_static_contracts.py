@@ -103,6 +103,11 @@ class StaticContractTests(unittest.TestCase):
         self.assertNotIn("Type=notify", service)
         self.assertNotIn("--supervised systemd", service)
         self.assertIn("supervised no", redis_config)
+        self.assertIn(
+            "{% if maxmemory %}\nmaxmemory {{ maxmemory }}\n{% endif %}\n"
+            "maxmemory-policy {{ maxmemory_policy }}",
+            redis_config,
+        )
 
     def test_deployments_require_manual_start_and_logs_auto_poll(self):
         models = (ROOT / "backend" / "app" / "models.py").read_text(encoding="utf-8")

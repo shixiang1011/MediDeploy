@@ -33,5 +33,7 @@ cluster-announce-ip {{ redis_advertise_address }}
 cluster-announce-port {{ redis_port }}
 cluster-announce-bus-port {{ redis_port | int + 10000 }}
 {% endif %}
-{% if maxmemory %}maxmemory {{ maxmemory }}{% endif %}
+{% if maxmemory %}
+maxmemory {{ maxmemory }}
+{% endif %}
 maxmemory-policy {{ maxmemory_policy }}
