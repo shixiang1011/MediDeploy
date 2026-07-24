@@ -1,0 +1,57 @@
+---
+- name: Roll back exact Redis resources owned by this task
+  hosts: redis
+  gather_facts: false
+  serial: 1
+  tasks:
+    - name: Derive task-owned service and marker
+      ansible.builtin.set_fact:
+        redis_service_name: "spmp-redis-{{ spmp_task_id[:8] }}-{{ redis_instance_id }}"
+        redis_service_user: "spmpr{{ (spmp_task_id | regex_replace('-', ''))[:8] }}{{ redis_instance_id | regex_replace('[^0-9]', '') }}"
+        redis_marker_path: "{{ redis_config_path }}/.spmp-managed-{{ spmp_task_id }}-{{ redis_instance_id }}"
+
+    - name: Verify ownership marker
+      ansible.builtin.stat:
+        path: "{{ redis_marker_path }}"
+      register: ownership_marker
+      failed_when: false
+
+    - name: Stop task-owned Redis service
+      ansible.builtin.systemd_service:
+        name: "{{ redis_service_name }}"
+        state: stopped
+        enabled: false
+      when: ownership_marker.stat.exists | default(false)
+      failed_when: false
+
+    - name: Remove exact task-owned systemd unit
+      ansible.builtin.file:
+        path: "/etc/systemd/system/{{ redis_service_name }}.service"
+        state: absent
+      when: ownership_marker.stat.exists | default(false)
+      failed_when: false
+
+    - name: Remove exact task-owned directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ redis_install_path }}"
+        - "{{ redis_data_path }}"
+        - "{{ redis_log_path }}"
+        - "{{ redis_config_path }}"
+      when: ownership_marker.stat.exists | default(false)
+      failed_when: false
+
+    - name: Remove the task-owned service user without touching home paths
+      ansible.builtin.user:
+        name: "{{ redis_service_user }}"
+        state: absent
+        remove: false
+      when: ownership_marker.stat.exists | default(false)
+      failed_when: false
+
+    - name: Reload systemd after rollback
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      failed_when: false

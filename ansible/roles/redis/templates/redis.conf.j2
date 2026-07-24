@@ -25,11 +25,13 @@ requirepass {{ redis_password }}
 appendonly {{ 'yes' if appendonly else 'no' }}
 appendfilename "appendonly.aof"
 appendfsync everysec
-cluster-enabled yes
+cluster-enabled {{ 'yes' if redis_deployment_mode == 'cluster' else 'no' }}
+{% if redis_deployment_mode == 'cluster' %}
 cluster-config-file nodes.conf
 cluster-node-timeout 5000
-cluster-announce-ip {{ ansible_host }}
+cluster-announce-ip {{ redis_advertise_address }}
 cluster-announce-port {{ redis_port }}
 cluster-announce-bus-port {{ redis_port | int + 10000 }}
+{% endif %}
 {% if maxmemory %}maxmemory {{ maxmemory }}{% endif %}
 maxmemory-policy {{ maxmemory_policy }}

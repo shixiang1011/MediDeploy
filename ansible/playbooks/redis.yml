@@ -1,0 +1,123 @@
+---
+- name: Preflight every Redis instance before changing any target
+  hosts: redis
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Collect minimum operating system facts
+      ansible.builtin.setup:
+        gather_subset:
+          - min
+
+    - name: Require x86_64 architecture
+      ansible.builtin.assert:
+        that: ansible_architecture in ['x86_64', 'amd64']
+        fail_msg: "当前仅支持 x86_64，目标实例 {{ inventory_hostname }} 架构不兼容"
+
+    - name: Require root privileges after optional sudo elevation
+      ansible.builtin.command: id -u
+      changed_when: false
+      register: effective_user
+
+    - name: Reject insufficient privileges
+      ansible.builtin.assert:
+        that: effective_user.stdout | trim == '0'
+        fail_msg: "目标实例 {{ inventory_hostname }} 未获得 root 或 sudo 权限"
+
+    - name: Check mandatory offline runtime dependencies
+      ansible.builtin.command: "sh -c 'command -v {{ item }}'"
+      changed_when: false
+      loop:
+        - python3
+        - tar
+        - ss
+        - systemctl
+
+    - name: Check source build dependencies
+      ansible.builtin.command: "sh -c 'command -v {{ item }}'"
+      changed_when: false
+      loop:
+        - make
+        - gcc
+      when: redis_package_type == 'source'
+
+    - name: Verify uploaded package exists on control node
+      ansible.builtin.stat:
+        path: "{{ redis_package_path }}"
+      delegate_to: localhost
+      become: false
+      register: package_file
+
+    - name: Reject missing uploaded package
+      ansible.builtin.assert:
+        that: package_file.stat.exists
+        fail_msg: "平台软件包存储中不存在所选 Redis 包"
+
+    - name: Derive task-owned service and marker
+      ansible.builtin.set_fact:
+        redis_service_name: "spmp-redis-{{ spmp_task_id[:8] }}-{{ redis_instance_id }}"
+        redis_service_user: "spmpr{{ (spmp_task_id | regex_replace('-', ''))[:8] }}{{ redis_instance_id | regex_replace('[^0-9]', '') }}"
+        redis_marker_path: "{{ redis_config_path }}/.spmp-managed-{{ spmp_task_id }}-{{ redis_instance_id }}"
+
+    - name: Reject an existing service with the same task identity
+      ansible.builtin.command: "systemctl cat {{ redis_service_name }}"
+      changed_when: false
+      failed_when: false
+      register: existing_service
+
+    - name: Require unused service identity
+      ansible.builtin.assert:
+        that: existing_service.rc != 0
+        fail_msg: "服务 {{ redis_service_name }} 已存在，拒绝覆盖"
+
+    - name: Check all configured target paths
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ redis_install_path }}"
+        - "{{ redis_data_path }}"
+        - "{{ redis_log_path }}"
+        - "{{ redis_config_path }}"
+      register: target_paths
+
+    - name: Require every target path to be unused
+      ansible.builtin.assert:
+        that: not item.stat.exists
+        fail_msg: "目标路径 {{ item.item }} 已存在，拒绝覆盖"
+      loop: "{{ target_paths.results }}"
+
+    - name: Check whether required Redis ports are already listening
+      ansible.builtin.shell: "ss -ltn | grep -Eq '[:.]{{ item }}([[:space:]]|$)'"
+      changed_when: false
+      failed_when: false
+      loop: "{{ [redis_port | int] + ([redis_port | int + 10000] if redis_deployment_mode == 'cluster' else []) }}"
+      register: redis_ports_in_use
+
+    - name: Require every Redis and Cluster Bus port to be unused
+      ansible.builtin.assert:
+        that: item.rc != 0
+        fail_msg: "端口 {{ item.item }} 已被占用"
+      loop: "{{ redis_ports_in_use.results }}"
+
+- name: Install and start every Redis instance
+  hosts: redis
+  gather_facts: false
+  any_errors_fatal: true
+  serial: 1
+  roles:
+    - redis
+
+- name: Create Redis Cluster after every instance is ready
+  hosts: redis
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Create Redis Cluster from the first configured instance
+      ansible.builtin.command: >-
+        {{ redis_install_path }}/bin/redis-cli --cluster create
+        {% for node in redis_nodes %}{{ node.address }}:{{ node.port }} {% endfor %}
+        --cluster-replicas {{ redis_replicas_per_primary }}
+        --cluster-yes -a {{ redis_password }}
+      no_log: true
+      run_once: true
+      when: redis_deployment_mode == 'cluster'

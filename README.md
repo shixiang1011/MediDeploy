@@ -1,47 +1,75 @@
 # SP MediDeploy Platform（SPMP）
 
-面向离线/内网服务器的中间件部署平台。首个可用模块为 Redis Cluster，后续可按相同模式扩展 Nacos、Nexus、MinIO 等组件。
+SPMP 是面向内网和离线服务器的通用中间件部署平台。平台采用 FastAPI、Vue 3、MySQL 和 Ansible，并通过 Docker Compose 运行。
 
-## 已实现的 Redis MVP
+当前版本完整实现 Redis 普通单机和 Redis Cluster 部署。Nacos、MinIO、RabbitMQ、Kafka、Elasticsearch、Nginx、Nexus 已进入组件注册表，后续可按相同插件边界增加部署实现。
 
-- FastAPI + Vue 3 管理后台，Docker Compose 一键运行
-- 多租户隔离、内置管理员、角色模型、审计日志
-- SSH 资产录入（用户名、端口、私钥）、操作系统/架构信息
-- Web 管理员上传 Redis 源码包；Redis `6.2.17` 作为首期预置推荐版本
-- Redis Cluster 自定义节点数、副本数、端口、安装/数据/日志/配置目录
-- 用户优先的 `redis.conf` 编辑；未编辑时由默认模板生成
-- Ansible 部署、预检、日志持久化、任务取消和失败自动回滚
-- 回滚只处理该次任务在资源清单中登记的 systemd 单元、配置、安装/数据/日志目录；既有路径、既有 Redis 服务和既有数据一律拒绝覆盖
-- 本地登录和 LDAP/AD 配置接口（LDAP 连接信息经应用密钥加密保存）
+## 当前能力
+
+- 通用服务器资产：SSH 用户名/密码登录，可选 sudo 提权和独立 sudo 密码。
+- 保存服务器前检查 SSH、sudo、Python 3、操作系统、x86_64 架构和磁盘空间。
+- 通用软件包仓库：支持各中间件的源码包和已编译二进制包。
+- 软件包格式仅允许 `.tar.gz` 和 `.tgz`，不计算 SHA-256。
+- Redis 单机模式：部署一个不启用 Cluster 的普通 Redis 实例。
+- Redis Cluster：自定义主节点数、副本数和实例位置。
+- 同一服务器允许部署多个 Redis 实例，但端口和任务目录不得重复或互相嵌套。
+- 每个实例可独立设置端口、安装目录、数据目录、日志目录、配置目录和 `redis.conf`。
+- 类云服务器购买流程的分步向导：基础信息、拓扑配置、运行参数、确认提交。
+- 全部实例先统一预检；任一预检失败时不开始变更。
+- 失败时执行独立回滚 playbook，只清理带任务所有权标记的精确资源。
+- 多租户、角色、LDAP 和审计数据模型继续保留，平台管理界面暂时隐藏。
+- Alembic 管理数据库版本。
+
+## 目标服务器前置条件
+
+所有目标服务器必须预先准备：
+
+- SSH 密码登录。
+- root 用户，或具备 sudo 权限的普通用户。
+- Python 3、`tar`、`ss`、`systemctl`。
+- 使用源码包时还需要 `make` 和 `gcc`。
+- 节点间开放 Redis 服务端口和 Cluster Bus 端口（Redis 端口 + 10000）。
+
+平台不会在目标机上联网安装依赖。依赖不完整时预检失败，不会开始部署。
 
 ## 启动
 
-1. 复制 `.env.example` 为 `.env`，设置全部密码和 `SECRET_KEY`。
-2. 执行 `docker compose up -d --build`。
-3. 访问 `http://<平台地址>:8080`，使用 `.env` 中的 `SPMP_BOOTSTRAP_ADMIN` 登录。
-4. 在“软件包”页面上传 `redis-6.2.17.tar.gz`（或其他 Redis 源码包），再创建部署任务。平台不从互联网下载软件包。
+1. 复制 `.env.example` 为 `.env`，设置 MySQL 密码、`SECRET_KEY` 和初始管理员密码。
+2. 执行：
 
-首次登录使用本地管理员；生产环境应立即修改密码并配置 HTTPS 反向代理。
+   ```bash
+   docker-compose up -d --build
+   ```
 
-### 平台自身的离线安装
+3. 访问 `http://<平台地址>:8080`。
+4. 使用 `.env` 中 `SPMP_BOOTSTRAP_ADMIN` 和 `SPMP_BOOTSTRAP_PASSWORD` 的实际值登录。
 
-Redis 的目标机部署不访问互联网。若 SPMP 管理平台所在环境也完全离线，请在一台可联网的构建机执行一次 `docker compose build`，通过 `docker save` 导出构建出的 `api`、`worker`、`web` 镜像以及 `mysql:8.4`，再在离线环境执行 `docker load` 和 `docker compose up -d`。Docker 构建阶段会下载 Python、Node 和系统依赖，因此不能直接在完全离线的空白环境构建。
+API 容器启动时自动执行 `alembic upgrade head`。Worker 会等待 API 健康后再启动。
 
-## 源码编译前置条件
+## 软件包约定
 
-源码包可用于内置版本或管理员上传版本。提交任务前，执行人员必须确保每个目标机已离线安装以下命令：`python3`、`tar`、`make`、`gcc`、`sudo`、`systemctl`。平台会先执行预检，缺项时不会开始部署；由于内网环境，平台不会尝试从目标操作系统的软件源下载安装依赖。
+源码包应包含一个 `redis-*` 根目录，例如官方 `redis-6.2.17.tar.gz`。
 
-## Redis Cluster 约束
+已编译二进制包可包含任意目录结构，但必须能够递归找到：
 
-- 节点数至少为 `3`。
-- `副本数 + 1` 必须能整除节点数，例如 6 节点可选 0 或 1 副本。
-- 所有节点必须互通 Redis 端口及其 Cluster bus 端口（默认是 Redis 端口 + 10000）。防火墙由环境管理员预先处理。
-- 平台以任务 UUID 作为资源所有权标识。发现目标路径非空、服务名已存在或端口被监听时，任务失败且不修改机器。
+- `redis-server`
+- `redis-cli`
 
-## 安全说明
+## 安全与回滚
 
-不使用 `rm` 进行回滚。Ansible 的 `file: state=absent` 仅对本任务登记且创建成功的精确目录执行；先停止由本任务创建的 systemd 服务。该策略不能、也不会处理部署前已经存在的任何内容。
+- SSH 密码、sudo 密码、Redis 密码使用平台 `SECRET_KEY` 派生密钥加密保存。
+- 首次连接目标服务器时采用 TOFU 记录 SSH 主机密钥；之后主机密钥变化会被拒绝。
+- 不使用 `rm` 执行部署回滚。
+- Ansible `file: state=absent` 只处理本任务创建且存在任务所有权标记的精确路径。
+- 目标路径、端口或服务已存在时，预检直接拒绝部署。
+- 自定义 `redis.conf` 优先级最高，用户需确保其中的端口和 Cluster 配置与向导一致。
 
-## 目录
+## 测试
 
-`backend/` API 和 Worker；`frontend/` Vue 3 后台；`ansible/` Redis 角色。上传的软件包存储于 Docker 持久卷，不需要也不应手工放入宿主机目录。
+无需安装业务依赖即可运行静态契约测试：
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+正式验收还包括 Docker 镜像构建、Alembic 初始化、API 登录、Vue 页面渲染和 Ansible `--syntax-check`。

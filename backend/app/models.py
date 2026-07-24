@@ -1,8 +1,10 @@
 import enum
 import uuid
 from datetime import datetime
+
 from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
+
 from app.database import Base
 
 
@@ -27,9 +29,21 @@ class TaskStatus(str, enum.Enum):
     CANCELLED = "cancelled"
 
 
+class PackageType(str, enum.Enum):
+    SOURCE = "source"
+    BINARY = "binary"
+
+
+class DeploymentMode(str, enum.Enum):
+    STANDALONE = "standalone"
+    CLUSTER = "cluster"
+
+
 class TimestampMixin:
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
 
 
 class Tenant(Base, TimestampMixin):
@@ -52,17 +66,22 @@ class User(Base, TimestampMixin):
 
 class Host(Base, TimestampMixin):
     __tablename__ = "hosts"
-    __table_args__ = (UniqueConstraint("tenant_id", "address", name="uq_host_tenant_address"),)
+    __table_args__ = (UniqueConstraint("tenant_id", "address", "ssh_port", name="uq_host_endpoint"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     address: Mapped[str] = mapped_column(String(255), nullable=False)
     ssh_port: Mapped[int] = mapped_column(Integer, default=22, nullable=False)
     ssh_user: Mapped[str] = mapped_column(String(100), nullable=False)
-    ssh_private_key_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    ssh_password_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    use_sudo: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    sudo_password_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     os_family: Mapped[str] = mapped_column(String(50), nullable=False)
     os_version: Mapped[str] = mapped_column(String(100), nullable=False)
     architecture: Mapped[str] = mapped_column(String(20), default="x86_64", nullable=False)
+    facts: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    connection_status: Mapped[str] = mapped_column(String(20), default="verified", nullable=False)
+    last_tested_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
@@ -70,13 +89,13 @@ class Package(Base, TimestampMixin):
     __tablename__ = "packages"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     tenant_id: Mapped[str | None] = mapped_column(ForeignKey("tenants.id"), nullable=True, index=True)
-    component: Mapped[str] = mapped_column(String(32), default="redis", nullable=False)
+    component: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     version: Mapped[str] = mapped_column(String(80), nullable=False)
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
     storage_path: Mapped[str] = mapped_column(String(512), nullable=False)
-    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    package_type: Mapped[str] = mapped_column(String(20), default="source", nullable=False)
+    package_type: Mapped[PackageType] = mapped_column(Enum(PackageType), nullable=False)
     architecture: Mapped[str] = mapped_column(String(20), default="x86_64", nullable=False)
+    description: Mapped[str] = mapped_column(String(500), default="", nullable=False)
     uploaded_by: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
 
 
@@ -85,9 +104,12 @@ class Deployment(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
-    component: Mapped[str] = mapped_column(String(32), default="redis", nullable=False)
+    component: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    mode: Mapped[DeploymentMode] = mapped_column(Enum(DeploymentMode), nullable=False)
     package_id: Mapped[str] = mapped_column(ForeignKey("packages.id"), nullable=False)
-    status: Mapped[TaskStatus] = mapped_column(Enum(TaskStatus), default=TaskStatus.QUEUED, nullable=False, index=True)
+    status: Mapped[TaskStatus] = mapped_column(
+        Enum(TaskStatus), default=TaskStatus.QUEUED, nullable=False, index=True
+    )
     requested_by: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
     config: Mapped[dict] = mapped_column(JSON, nullable=False)
     rollback_result: Mapped[str | None] = mapped_column(Text, nullable=True)
