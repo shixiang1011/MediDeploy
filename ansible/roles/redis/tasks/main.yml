@@ -106,13 +106,32 @@
     fail_msg: "源码包必须包含一个 redis-* 根目录"
   when: redis_package_type == 'source'
 
-- name: Build Redis source package
-  ansible.builtin.command: make BUILD_TLS=no
+- name: Start Redis source build (progress is checked every 10 seconds)
+  ansible.builtin.command:
+    argv:
+      - runuser
+      - -u
+      - "{{ redis_service_user }}"
+      - --
+      - make
+      - -j2
+      - BUILD_TLS=no
   args:
     chdir: "{{ redis_source_dirs.files[0].path }}"
   environment:
     HOME: "{{ redis_install_path }}"
-  become_user: "{{ redis_service_user }}"
+  async: 1800
+  poll: 0
+  register: redis_build_job
+  when: redis_package_type == 'source'
+
+- name: Wait for Redis source build (30 minute limit)
+  ansible.builtin.async_status:
+    jid: "{{ redis_build_job.ansible_job_id }}"
+  register: redis_build_result
+  until: redis_build_result.finished
+  retries: 180
+  delay: 10
   when: redis_package_type == 'source'
 
 - name: Install Redis binaries built from source

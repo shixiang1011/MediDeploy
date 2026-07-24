@@ -40,6 +40,8 @@
         - setfacl
         - tail
         - systemctl
+        - pkill
+        - runuser
 
     - name: Check source build dependencies
       ansible.builtin.command: "sh -c 'command -v {{ item }}'"

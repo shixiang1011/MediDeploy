@@ -67,7 +67,23 @@ def run_task(task_id: str) -> None:
         )
     except Exception as exc:
         add_log(task_id, f"Worker 异常：{exc}", "ERROR")
-        deploy_result, rollback_result = 1, 1
+        add_log(
+            task_id,
+            "Worker 异常发生在任务执行期间，开始按精确资源清单执行保护性回滚",
+            "WARN",
+        )
+        deploy_result = 1
+        try:
+            _, rollback_result = call_ansible(
+                task_id,
+                package,
+                config,
+                hosts_by_id,
+                rollback_only=True,
+            )
+        except Exception as rollback_exc:
+            rollback_result = 1
+            add_log(task_id, f"Worker 异常后的保护性回滚失败：{rollback_exc}", "ERROR")
 
     with SessionLocal() as db:
         task = db.get(Deployment, task_id)
@@ -129,6 +145,7 @@ def call_ansible(
     package: Package,
     config: dict,
     hosts_by_id: dict[str, Host],
+    rollback_only: bool = False,
 ) -> tuple[int, int | None]:
     with tempfile.TemporaryDirectory(prefix="spmp-task-") as temp_dir:
         root = Path(temp_dir)
@@ -192,6 +209,16 @@ def call_ansible(
 
         process_env = os.environ.copy()
         process_env["ANSIBLE_ROLES_PATH"] = str(Path(settings().ansible_dir) / "roles")
+        if rollback_only:
+            rollback_result = stream_playbook(
+                task_id,
+                inventory_path,
+                vars_path,
+                Path(settings().ansible_dir) / "playbooks" / "redis_rollback.yml",
+                process_env,
+            )
+            return 1, rollback_result
+
         preflight_result = stream_playbook(
             task_id,
             inventory_path,
@@ -268,7 +295,98 @@ def stream_playbook(
     return process.wait()
 
 
+def recover_interrupted_tasks() -> None:
+    """Roll back tasks whose worker disappeared before recording a final state."""
+    with SessionLocal() as db:
+        interrupted_ids = list(
+            db.scalars(
+                select(Deployment.id)
+                .where(
+                    Deployment.status.in_(
+                        (TaskStatus.RUNNING, TaskStatus.ROLLING_BACK)
+                    )
+                )
+                .order_by(Deployment.created_at)
+            )
+        )
+
+    for task_id in interrupted_ids:
+        with SessionLocal() as db:
+            task = db.get(Deployment, task_id)
+            if not task or task.status not in (
+                TaskStatus.RUNNING,
+                TaskStatus.ROLLING_BACK,
+            ):
+                continue
+            package = db.get(Package, task.package_id)
+            config = dict(task.config)
+            host_ids = {item["host_id"] for item in config.get("instances", [])}
+            hosts = db.scalars(select(Host).where(Host.id.in_(host_ids))).all()
+            hosts_by_id = {host.id: host for host in hosts}
+            task.status = TaskStatus.ROLLING_BACK
+            db.commit()
+
+        add_log(
+            task_id,
+            "检测到 Worker 重启导致任务执行中断，开始清理该任务已创建的精确资源",
+            "WARN",
+        )
+
+        if (
+            not package
+            or not config.get("instances")
+            or len(hosts_by_id) != len(host_ids)
+        ):
+            rollback_result = 1
+            add_log(
+                task_id,
+                "中断任务缺少软件包、实例或服务器记录，无法自动构建完整回滚清单",
+                "ERROR",
+            )
+        else:
+            try:
+                _, rollback_result = call_ansible(
+                    task_id,
+                    package,
+                    config,
+                    hosts_by_id,
+                    rollback_only=True,
+                )
+            except Exception as exc:
+                rollback_result = 1
+                add_log(task_id, f"中断任务自动回滚异常：{exc}", "ERROR")
+
+        with SessionLocal() as db:
+            task = db.get(Deployment, task_id)
+            if not task:
+                continue
+            if rollback_result == 0:
+                task.status = TaskStatus.ROLLED_BACK
+                task.rollback_result = "Worker 重启中断部署，已完成自动回滚"
+                db.add(
+                    TaskLog(
+                        deployment_id=task_id,
+                        message="中断任务已清理完成，可以重新创建或重试部署任务",
+                        level="ERROR",
+                    )
+                )
+            else:
+                task.status = TaskStatus.FAILED
+                task.rollback_result = (
+                    "Worker 重启中断部署，自动回滚未完全成功，请根据日志人工核验"
+                )
+                db.add(
+                    TaskLog(
+                        deployment_id=task_id,
+                        message="中断任务自动回滚未完全成功，请人工核验任务资源清单",
+                        level="ERROR",
+                    )
+                )
+            db.commit()
+
+
 def main() -> None:
+    recover_interrupted_tasks()
     while True:
         try:
             task_id = claim_task()

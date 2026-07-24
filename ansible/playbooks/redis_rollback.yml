@@ -56,6 +56,17 @@
       when: ownership_marker.stat.exists | default(false)
       failed_when: false
 
+    - name: Stop exact task-owned build or service processes
+      ansible.builtin.command:
+        argv:
+          - pkill
+          - -TERM
+          - -u
+          - "{{ redis_service_user }}"
+      when: ownership_marker.stat.exists | default(false)
+      changed_when: false
+      failed_when: false
+
     - name: Remove exact task-owned systemd unit
       ansible.builtin.file:
         path: "/etc/systemd/system/{{ redis_service_name }}.service"
