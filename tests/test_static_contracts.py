@@ -79,7 +79,11 @@ class StaticContractTests(unittest.TestCase):
         self.assertIn("redis_package_type == 'source'", tasks)
         self.assertIn("redis_package_type == 'binary'", tasks)
         self.assertIn('- "{{ redis_install_path }}/bin"', tasks)
-        self.assertIn("Collect Redis systemd status after a start failure", tasks)
+        self.assertIn("Wait for Redis on the target loopback interface", tasks)
+        self.assertIn('host: "127.0.0.1"', tasks)
+        self.assertIn("REDISCLI_AUTH", tasks)
+        self.assertIn("Collect Redis application log after a verification failure", tasks)
+        self.assertNotIn('host: "{{ redis_advertise_address }}"', tasks)
 
         service = (
             ROOT / "ansible" / "roles" / "redis" / "templates" / "redis.service.j2"

@@ -165,7 +165,7 @@
     mode: '0600'
   no_log: true
 
-- name: Enable and start Redis service with diagnostics
+- name: Start and verify Redis service with diagnostics
   block:
     - name: Enable and start the task-owned Redis service
       ansible.builtin.systemd_service:
@@ -173,8 +173,28 @@
         enabled: true
         state: started
         daemon_reload: true
+
+    - name: Wait for Redis on the target loopback interface
+      ansible.builtin.wait_for:
+        host: "127.0.0.1"
+        port: "{{ redis_port }}"
+        timeout: 45
+
+    - name: Verify Redis responds to an authenticated PING
+      ansible.builtin.command:
+        argv:
+          - "{{ redis_install_path }}/bin/redis-cli"
+          - -h
+          - "127.0.0.1"
+          - -p
+          - "{{ redis_port | string }}"
+          - ping
+      environment:
+        REDISCLI_AUTH: "{{ redis_password }}"
+      changed_when: false
+      no_log: true
   rescue:
-    - name: Collect Redis systemd status after a start failure
+    - name: Collect Redis systemd status after a verification failure
       ansible.builtin.command:
         argv:
           - systemctl
@@ -199,18 +219,34 @@
       failed_when: false
       register: redis_journal
 
-    - name: Show Redis service start diagnostics
+    - name: Collect listening TCP ports after a verification failure
+      ansible.builtin.command:
+        argv:
+          - ss
+          - -ltnp
+      changed_when: false
+      failed_when: false
+      register: redis_listening_ports
+
+    - name: Collect Redis application log after a verification failure
+      ansible.builtin.command:
+        argv:
+          - tail
+          - -n
+          - "80"
+          - "{{ redis_log_path }}/redis.log"
+      changed_when: false
+      failed_when: false
+      register: redis_application_log
+
+    - name: Show Redis service verification diagnostics
       ansible.builtin.debug:
         msg:
           - "{{ redis_systemd_status.stdout_lines | default([]) }}"
           - "{{ redis_journal.stdout_lines | default([]) }}"
+          - "{{ redis_listening_ports.stdout_lines | default([]) }}"
+          - "{{ redis_application_log.stdout_lines | default([]) }}"
 
-    - name: Stop deployment after recording Redis start diagnostics
+    - name: Stop deployment after recording Redis verification diagnostics
       ansible.builtin.fail:
-        msg: "Redis 服务启动失败，systemd 状态和最近日志已写入部署日志"
-
-- name: Wait for Redis instance port
-  ansible.builtin.wait_for:
-    host: "{{ redis_advertise_address }}"
-    port: "{{ redis_port }}"
-    timeout: 30
+        msg: "Redis 启动或健康检查失败，systemd、监听端口和 Redis 日志已写入部署日志"
