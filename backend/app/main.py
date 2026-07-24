@@ -383,7 +383,7 @@ def package_view(item: Package) -> dict:
     }
 
 
-@app.post("/api/deployments", status_code=202)
+@app.post("/api/deployments", status_code=201)
 def create_deployment(
     body: DeploymentCreate,
     user: User = Depends(require(Role.SUPER_ADMIN, Role.TENANT_ADMIN, Role.OPERATOR)),
@@ -416,12 +416,13 @@ def create_deployment(
         component=body.component,
         mode=body.mode,
         package_id=package.id,
+        status=TaskStatus.DRAFT,
         requested_by=user.id,
         config=config,
     )
     db.add(deployment)
     db.flush()
-    db.add(TaskLog(deployment_id=deployment.id, message="任务已提交，等待 Worker 执行完整预检"))
+    db.add(TaskLog(deployment_id=deployment.id, message="任务配置已保存，等待操作人员开始部署"))
     audit(
         db,
         user,
@@ -448,6 +449,15 @@ def list_deployments(user: User = Depends(current_user), db: Session = Depends(g
     ]
 
 
+@app.get("/api/deployments/{deployment_id}")
+def get_deployment(
+    deployment_id: str,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    return deployment_view(owned_deployment(db, deployment_id, user))
+
+
 @app.get("/api/deployments/{deployment_id}/logs")
 def deployment_logs(
     deployment_id: str,
@@ -467,6 +477,23 @@ def deployment_logs(
     ]
 
 
+@app.post("/api/deployments/{deployment_id}/start", status_code=202)
+def start_deployment(
+    deployment_id: str,
+    user: User = Depends(require(Role.SUPER_ADMIN, Role.TENANT_ADMIN, Role.OPERATOR)),
+    db: Session = Depends(get_db),
+):
+    deployment = owned_deployment(db, deployment_id, user)
+    if deployment.status != TaskStatus.DRAFT:
+        raise HTTPException(status_code=409, detail="只有尚未开始的任务可以执行部署")
+    deployment.status = TaskStatus.QUEUED
+    db.add(TaskLog(deployment_id=deployment.id, message="操作人员已确认开始部署，等待 Worker 接收任务"))
+    audit(db, user, "start", "deployment", deployment.id, {})
+    db.commit()
+    db.refresh(deployment)
+    return deployment_view(deployment)
+
+
 @app.post("/api/deployments/{deployment_id}/retry", status_code=202)
 def retry_deployment(
     deployment_id: str,
@@ -482,12 +509,13 @@ def retry_deployment(
         component=old.component,
         mode=old.mode,
         package_id=old.package_id,
+        status=TaskStatus.DRAFT,
         requested_by=user.id,
         config=old.config,
     )
     db.add(retry)
     db.flush()
-    db.add(TaskLog(deployment_id=retry.id, message=f"重试任务，来源：{old.id}"))
+    db.add(TaskLog(deployment_id=retry.id, message=f"重试任务已创建，等待手动开始；来源：{old.id}"))
     audit(db, user, "retry", "deployment", retry.id, {"source": old.id})
     db.commit()
     return deployment_view(retry)

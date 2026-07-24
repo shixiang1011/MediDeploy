@@ -60,8 +60,13 @@ export default {
         maxmemory_policy: 'noeviction',
         appendonly: true,
       },
-      selectedDeployment: null,
-      taskLogs: [],
+      executionTask: null,
+      executionLogs: [],
+      executionLastLogId: 0,
+      executionTimer: null,
+      executionPolling: false,
+      executionNotifyOnFinish: false,
+      completionDialog: false,
     }
   },
   computed: {
@@ -107,6 +112,7 @@ export default {
       } catch (_) {}
     },
     logout() {
+      this.clearExecutionTimer()
       localStorage.removeItem('spmp-token')
       this.token = ''
       this.user = null
@@ -139,6 +145,7 @@ export default {
     },
     statusLabel(status) {
       return {
+        draft: '尚未开始',
         queued: '等待执行',
         running: '执行中',
         succeeded: '成功',
@@ -301,19 +308,85 @@ export default {
         this.deployments.unshift(item)
         this.wizardOpen = false
         this.active = 'tasks'
-        this.notice = '部署任务已提交，可在任务中心查看预检、执行和回滚日志。'
+        this.notice = '部署任务已保存，请在任务列表中点击“开始部署”。'
       } catch (_) {
       } finally {
         this.busy = false
       }
     },
-    async showTaskLogs(task) {
-      this.selectedDeployment = task
-      this.taskLogs = await this.request('get', `deployments/${task.id}/logs`)
+    isTerminal(status) {
+      return ['succeeded', 'failed', 'rolled_back', 'cancelled'].includes(status)
+    },
+    clearExecutionTimer() {
+      if (this.executionTimer) {
+        window.clearInterval(this.executionTimer)
+        this.executionTimer = null
+      }
+    },
+    async startTask(task) {
+      this.busy = true
+      this.error = ''
+      try {
+        const started = await this.request('post', `deployments/${task.id}/start`)
+        const index = this.deployments.findIndex((item) => item.id === task.id)
+        if (index >= 0) this.deployments[index] = started
+        await this.openExecution(started, true)
+      } catch (_) {
+      } finally {
+        this.busy = false
+      }
+    },
+    async openExecution(task, notifyOnFinish = false) {
+      this.clearExecutionTimer()
+      this.executionTask = task
+      this.executionLogs = []
+      this.executionLastLogId = 0
+      this.executionNotifyOnFinish = notifyOnFinish
+      this.completionDialog = false
+      await this.pollExecution()
+      if (this.executionTask && !this.isTerminal(this.executionTask.status)) {
+        this.executionTimer = window.setInterval(() => this.pollExecution(), 1000)
+      }
+    },
+    async pollExecution() {
+      if (!this.executionTask || this.executionPolling) return
+      const taskId = this.executionTask.id
+      this.executionPolling = true
+      try {
+        const [task, logs] = await Promise.all([
+          this.request('get', `deployments/${taskId}`),
+          this.request('get', `deployments/${taskId}/logs?after_id=${this.executionLastLogId}`),
+        ])
+        if (!this.executionTask || this.executionTask.id !== taskId) return
+        this.executionTask = task
+        if (logs.length) {
+          this.executionLogs.push(...logs)
+          this.executionLastLogId = logs[logs.length - 1].id
+          this.$nextTick(() => {
+            const box = this.$refs.executionLog
+            if (box) box.scrollTop = box.scrollHeight
+          })
+        }
+        if (this.isTerminal(task.status)) {
+          this.clearExecutionTimer()
+          if (this.executionNotifyOnFinish) this.completionDialog = true
+        }
+      } catch (_) {
+      } finally {
+        this.executionPolling = false
+      }
+    },
+    async closeExecution() {
+      this.clearExecutionTimer()
+      this.executionTask = null
+      this.executionLogs = []
+      this.completionDialog = false
+      this.active = 'tasks'
+      await this.refresh()
     },
     async retryTask(task) {
-      await this.request('post', `deployments/${task.id}/retry`)
-      this.notice = '重试任务已创建。'
+      const retry = await this.request('post', `deployments/${task.id}/retry`)
+      this.notice = `重试任务“${retry.name}”已创建，请点击“开始部署”。`
       await this.refresh()
     },
     async loadAuditLogs() {
@@ -323,6 +396,9 @@ export default {
   },
   mounted() {
     this.refresh()
+  },
+  beforeUnmount() {
+    this.clearExecutionTimer()
   },
 }
 </script>
@@ -341,6 +417,43 @@ export default {
       <small>请使用服务器 .env 文件中 SPMP_BOOTSTRAP_PASSWORD 的实际值登录。</small>
       <p v-if="error" class="error">{{ error }}</p>
     </section>
+  </main>
+
+  <main v-else-if="executionTask" class="execution-shell">
+    <header class="execution-header">
+      <div>
+        <span class="eyebrow">部署执行中心</span>
+        <h1>{{ executionTask.name }}</h1>
+        <p>{{ componentName(executionTask.component) }} · {{ executionTask.mode === 'standalone' ? '单机模式' : '集群模式' }} · {{ executionTask.id }}</p>
+      </div>
+      <div class="execution-actions">
+        <span class="status" :class="executionTask.status">{{ statusLabel(executionTask.status) }}</span>
+        <button class="secondary" @click="closeExecution">返回任务列表</button>
+      </div>
+    </header>
+    <section class="execution-body">
+      <div class="execution-progress">
+        <div :class="{done: executionTask.status !== 'queued'}"><span>1</span><b>任务排队</b></div>
+        <div :class="{done: ['running','rolling_back','succeeded','failed','rolled_back'].includes(executionTask.status)}"><span>2</span><b>预检与部署</b></div>
+        <div :class="{done: isTerminal(executionTask.status), warning: executionTask.status === 'rolling_back'}"><span>3</span><b>{{ executionTask.status === 'rolling_back' ? '自动回滚' : '执行完成' }}</b></div>
+      </div>
+      <div ref="executionLog" class="execution-log">
+        <div v-if="!executionLogs.length" class="execution-waiting">正在等待部署日志……</div>
+        <pre v-for="line in executionLogs" :key="line.id" :class="line.level.toLowerCase()"><span>[{{ new Date(line.created_at).toLocaleTimeString() }}]</span> <b>{{ line.level }}</b> {{ line.message }}</pre>
+      </div>
+      <p class="execution-hint">日志每秒自动更新，并始终滚动到最新内容，无需手动刷新。</p>
+    </section>
+    <div v-if="completionDialog" class="completion-backdrop">
+      <section class="completion-card">
+        <div class="completion-icon" :class="{success: executionTask.status === 'succeeded'}">{{ executionTask.status === 'succeeded' ? '✓' : '!' }}</div>
+        <h2>任务执行完成</h2>
+        <p v-if="executionTask.status === 'succeeded'">Redis 已部署成功，可以关闭部署界面。</p>
+        <p v-else-if="executionTask.status === 'rolled_back'">Redis 部署失败，本次任务创建的资源已自动回滚。</p>
+        <p v-else>Redis 部署失败，请根据执行日志检查原因。</p>
+        <span class="status" :class="executionTask.status">{{ statusLabel(executionTask.status) }}</span>
+        <button @click="closeExecution">关闭部署界面</button>
+      </section>
+    </div>
   </main>
 
   <main v-else class="app-shell">
@@ -510,11 +623,10 @@ export default {
         <h2>部署任务</h2>
         <table><thead><tr><th>任务</th><th>中间件/模式</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
           <tbody>
-            <tr v-for="task in deployments" :key="task.id"><td><b>{{ task.name }}</b><small>{{ task.id }}</small></td><td>{{ componentName(task.component) }}<small>{{ task.mode === 'standalone' ? '单机模式' : '集群模式' }}</small></td><td><span class="status" :class="task.status">{{ statusLabel(task.status) }}</span></td><td>{{ new Date(task.created_at).toLocaleString() }}</td><td><button class="link" @click="showTaskLogs(task)">日志</button><button v-if="['failed','rolled_back'].includes(task.status) && isOperator" class="link" @click="retryTask(task)">重试</button></td></tr>
+            <tr v-for="task in deployments" :key="task.id"><td><b>{{ task.name }}</b><small>{{ task.id }}</small></td><td>{{ componentName(task.component) }}<small>{{ task.mode === 'standalone' ? '单机模式' : '集群模式' }}</small></td><td><span class="status" :class="task.status">{{ statusLabel(task.status) }}</span></td><td>{{ new Date(task.created_at).toLocaleString() }}</td><td><button v-if="task.status === 'draft' && isOperator" :disabled="busy" @click="startTask(task)">开始部署</button><button v-else class="link" @click="openExecution(task, !isTerminal(task.status))">{{ isTerminal(task.status) ? '查看记录' : '进入部署' }}</button><button v-if="['failed','rolled_back'].includes(task.status) && isOperator" class="link" @click="retryTask(task)">创建重试任务</button></td></tr>
             <tr v-if="!deployments.length"><td colspan="5" class="muted">暂无部署任务。</td></tr>
           </tbody>
         </table>
-        <div v-if="selectedDeployment" class="logs"><div><h3>{{ selectedDeployment.name }} 日志</h3><button class="link" @click="showTaskLogs(selectedDeployment)">刷新</button></div><pre v-for="line in taskLogs" :key="line.id">[{{ new Date(line.created_at).toLocaleTimeString() }}] {{ line.level }} {{ line.message }}</pre></div>
       </section>
 
       <section v-if="active === 'audit'" class="panel">
@@ -524,3 +636,40 @@ export default {
     </section>
   </main>
 </template>
+
+<style>
+.status.running,.status.queued{background:#fff3dd;color:#a76700}
+.status.draft{background:#e9eef8;color:#596a88}
+.status.rolling_back{background:#fff0db;color:#9b5a00}
+.execution-shell{min-height:100vh;background:#0c1425;color:#e8eefb;padding:30px 42px;display:flex;flex-direction:column}
+.execution-header{margin:0 auto 24px;width:min(1320px,100%);color:#fff}
+.execution-header h1{font-size:28px;margin-top:7px}
+.execution-header p{color:#91a1bd}
+.eyebrow{color:#7ca2ff;font-size:12px;font-weight:800;letter-spacing:.12em}
+.execution-actions{display:flex;align-items:center;gap:12px}
+.execution-actions .secondary{background:#1e2b44;color:#dce6fb}
+.execution-body{width:min(1320px,100%);margin:0 auto;display:flex;flex:1;min-height:0;flex-direction:column}
+.execution-progress{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px}
+.execution-progress div{display:flex;align-items:center;gap:9px;background:#141f34;border:1px solid #26344f;border-radius:10px;padding:11px 14px;color:#8292ae}
+.execution-progress span{width:25px;height:25px;border-radius:50%;background:#283650;display:grid;place-items:center;font-size:12px}
+.execution-progress .done{color:#e7edfa;border-color:#385fae}
+.execution-progress .done span{background:#356bd8;color:#fff}
+.execution-progress .warning{border-color:#9a6829}
+.execution-log{background:#080d18;border:1px solid #26344f;border-radius:13px;padding:16px 18px;flex:1;min-height:440px;max-height:calc(100vh - 245px);overflow:auto;box-shadow:inset 0 1px 0 #ffffff08}
+.execution-log pre{font-family:"Cascadia Mono",Consolas,monospace;white-space:pre-wrap;word-break:break-word;color:#c6d0e3;font-size:12px;line-height:1.65;margin:0}
+.execution-log pre span{color:#60708e}
+.execution-log pre b{color:#7ea7ff}
+.execution-log pre.warn b{color:#ffc66d}
+.execution-log pre.error{color:#ffaaaa}
+.execution-log pre.error b{color:#ff6f6f}
+.execution-waiting{color:#7585a2;padding:10px;font-size:13px}
+.execution-hint{text-align:right;color:#687a98;font-size:12px}
+.completion-backdrop{position:fixed;inset:0;background:#050914c9;display:grid;place-items:center;z-index:50;backdrop-filter:blur(5px)}
+.completion-card{width:min(430px,calc(100vw - 36px));background:#fff;color:#172033;border-radius:18px;text-align:center;padding:34px;box-shadow:0 24px 80px #0008}
+.completion-card p{color:#66748b;line-height:1.7}
+.completion-card .status{display:inline-block;margin:3px 0 22px}
+.completion-card button{display:block;width:100%}
+.completion-icon{width:54px;height:54px;border-radius:50%;display:grid;place-items:center;margin:0 auto 18px;background:#ffeded;color:#c33;font-size:28px;font-weight:800}
+.completion-icon.success{background:#e2f7e9;color:#168046}
+@media(max-width:1000px){.execution-shell{padding:20px}.execution-header{align-items:flex-start;gap:15px}.execution-progress{grid-template-columns:1fr}.execution-log{max-height:none}}
+</style>

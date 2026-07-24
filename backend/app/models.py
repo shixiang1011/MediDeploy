@@ -20,6 +20,7 @@ class Role(str, enum.Enum):
 
 
 class TaskStatus(str, enum.Enum):
+    DRAFT = "draft"
     QUEUED = "queued"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
@@ -108,7 +109,7 @@ class Deployment(Base, TimestampMixin):
     mode: Mapped[DeploymentMode] = mapped_column(Enum(DeploymentMode), nullable=False)
     package_id: Mapped[str] = mapped_column(ForeignKey("packages.id"), nullable=False)
     status: Mapped[TaskStatus] = mapped_column(
-        Enum(TaskStatus), default=TaskStatus.QUEUED, nullable=False, index=True
+        Enum(TaskStatus), default=TaskStatus.DRAFT, nullable=False, index=True
     )
     requested_by: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
     config: Mapped[dict] = mapped_column(JSON, nullable=False)

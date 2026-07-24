@@ -6,7 +6,7 @@ tcp-backlog 511
 timeout 0
 tcp-keepalive 300
 daemonize no
-supervised systemd
+supervised no
 pidfile {{ redis_data_path }}/redis.pid
 loglevel notice
 logfile {{ redis_log_path }}/redis.log

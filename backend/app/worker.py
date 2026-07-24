@@ -185,6 +185,11 @@ def call_ansible(
         )
         if deploy_result == 0:
             return 0, 0
+        with SessionLocal() as db:
+            failed_task = db.get(Deployment, task_id)
+            if failed_task:
+                failed_task.status = TaskStatus.ROLLING_BACK
+                db.commit()
         add_log(task_id, "开始执行本任务精确资源清单回滚", "WARN")
         rollback_result = stream_playbook(
             task_id,
@@ -221,7 +226,13 @@ def stream_playbook(
     )
     assert process.stdout is not None
     for line in process.stdout:
-        add_log(task_id, line.rstrip())
+        message = line.rstrip()
+        level = "INFO"
+        if "fatal:" in message or "FAILED!" in message:
+            level = "ERROR"
+        elif "[WARNING]" in message:
+            level = "WARN"
+        add_log(task_id, message, level)
     return process.wait()
 
 

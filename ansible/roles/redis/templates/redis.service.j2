@@ -4,13 +4,15 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=notify
+Type=simple
 User={{ redis_service_user }}
 Group={{ redis_service_user }}
-ExecStart={{ redis_install_path }}/bin/redis-server {{ redis_config_path }}/redis.conf --supervised systemd
+ExecStart={{ redis_install_path }}/bin/redis-server {{ redis_config_path }}/redis.conf
 ExecStop={{ redis_install_path }}/bin/redis-cli -a {{ redis_password }} -p {{ redis_port }} shutdown save
 Restart=on-failure
 RestartSec=5
+TimeoutStartSec=90
+TimeoutStopSec=90
 LimitNOFILE=65535
 NoNewPrivileges=true
 PrivateTmp=true

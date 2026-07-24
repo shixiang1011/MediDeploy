@@ -31,6 +31,7 @@ class StaticContractTests(unittest.TestCase):
             self.assertIn(frontend_path, frontend)
             self.assertIn(backend_route, backend)
         self.assertIn('@app.get("/api/health")', backend)
+        self.assertIn('@app.post("/api/deployments/{deployment_id}/start"', backend)
 
     def test_frontend_is_extensible_simplified_chinese_wizard(self):
         frontend = (ROOT / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
@@ -78,6 +79,39 @@ class StaticContractTests(unittest.TestCase):
         self.assertIn("redis_package_type == 'source'", tasks)
         self.assertIn("redis_package_type == 'binary'", tasks)
         self.assertIn('- "{{ redis_install_path }}/bin"', tasks)
+        self.assertIn("Collect Redis systemd status after a start failure", tasks)
+
+        service = (
+            ROOT / "ansible" / "roles" / "redis" / "templates" / "redis.service.j2"
+        ).read_text(encoding="utf-8")
+        redis_config = (
+            ROOT / "ansible" / "roles" / "redis" / "templates" / "redis.conf.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Type=simple", service)
+        self.assertNotIn("Type=notify", service)
+        self.assertNotIn("--supervised systemd", service)
+        self.assertIn("supervised no", redis_config)
+
+    def test_deployments_require_manual_start_and_logs_auto_poll(self):
+        models = (ROOT / "backend" / "app" / "models.py").read_text(encoding="utf-8")
+        api = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+        frontend = (ROOT / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
+        migration = (
+            ROOT
+            / "backend"
+            / "migrations"
+            / "versions"
+            / "20260724_0002_deployment_draft_status.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('DRAFT = "draft"', models)
+        self.assertIn("status=TaskStatus.DRAFT", api)
+        self.assertIn("deployment.status = TaskStatus.QUEUED", api)
+        self.assertIn('"DRAFT"', migration)
+        self.assertIn("开始部署", frontend)
+        self.assertIn("window.setInterval(() => this.pollExecution(), 1000)", frontend)
+        self.assertIn("after_id=${this.executionLastLogId}", frontend)
+        self.assertNotIn("showTaskLogs", frontend)
 
     def test_worker_runs_explicit_rollback_playbook(self):
         worker = (ROOT / "backend" / "app" / "worker.py").read_text(encoding="utf-8")
