@@ -278,6 +278,53 @@ def create_host(
     return host_view(host)
 
 
+@app.put("/api/hosts/{host_id}")
+def update_host(
+    host_id: str,
+    body: HostCreate,
+    user: User = Depends(require(Role.SUPER_ADMIN, Role.TENANT_ADMIN, Role.OPERATOR)),
+    db: Session = Depends(get_db),
+):
+    host = db.get(Host, host_id)
+    if not host or (user.role != Role.SUPER_ADMIN and host.tenant_id != user.tenant_id):
+        raise HTTPException(status_code=404, detail="未找到服务器资产")
+    try:
+        facts = probe_host(body)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"更新前连接测试失败：{str(exc)[-2000:]}")
+
+    host.name = body.name
+    host.address = body.address
+    host.ssh_port = body.ssh_port
+    host.ssh_user = body.ssh_user
+    host.ssh_password_encrypted = encrypt(body.ssh_password)
+    host.use_sudo = body.use_sudo
+    host.sudo_password_encrypted = (
+        encrypt(body.sudo_password or body.ssh_password) if body.use_sudo else None
+    )
+    host.os_family = facts["os_family"]
+    host.os_version = facts["os_version"]
+    host.architecture = facts["architecture"]
+    host.facts = facts
+    host.connection_status = "verified"
+    host.last_tested_at = datetime.utcnow()
+    audit(
+        db,
+        user,
+        "update_credentials",
+        "host",
+        host.id,
+        {"address": host.address, "ssh_user": host.ssh_user},
+    )
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="该租户已登记相同的服务器地址和 SSH 端口")
+    db.refresh(host)
+    return host_view(host)
+
+
 def host_view(host: Host) -> dict:
     return {
         "id": host.id,
@@ -501,7 +548,12 @@ def retry_deployment(
     db: Session = Depends(get_db),
 ):
     old = owned_deployment(db, deployment_id, user)
-    if old.status not in (TaskStatus.FAILED, TaskStatus.ROLLED_BACK):
+    retryable_preflight_failure = (
+        old.status == TaskStatus.FAILED
+        and old.rollback_result is not None
+        and "预检失败" in old.rollback_result
+    )
+    if old.status != TaskStatus.ROLLED_BACK and not retryable_preflight_failure:
         raise HTTPException(status_code=409, detail="只有失败且已回滚的任务可以重试")
     retry = Deployment(
         tenant_id=old.tenant_id,
@@ -519,6 +571,29 @@ def retry_deployment(
     audit(db, user, "retry", "deployment", retry.id, {"source": old.id})
     db.commit()
     return deployment_view(retry)
+
+
+@app.post("/api/deployments/{deployment_id}/rollback", status_code=202)
+def retry_deployment_rollback(
+    deployment_id: str,
+    user: User = Depends(require(Role.SUPER_ADMIN, Role.TENANT_ADMIN, Role.OPERATOR)),
+    db: Session = Depends(get_db),
+):
+    deployment = owned_deployment(db, deployment_id, user)
+    if deployment.status != TaskStatus.FAILED:
+        raise HTTPException(status_code=409, detail="只有回滚不完整的失败任务可以重新回滚")
+    deployment.status = TaskStatus.ROLLBACK_QUEUED
+    db.add(
+        TaskLog(
+            deployment_id=deployment.id,
+            message="操作人员请求重新回滚，等待 Worker 接收任务",
+            level="WARN",
+        )
+    )
+    audit(db, user, "retry_rollback", "deployment", deployment.id, {})
+    db.commit()
+    db.refresh(deployment)
+    return deployment_view(deployment)
 
 
 def owned_deployment(db: Session, deployment_id: str, user: User) -> Deployment:

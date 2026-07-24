@@ -44,6 +44,7 @@ export default {
       auditLogs: [],
       hostForm: emptyHost(),
       hostTest: null,
+      editingHostId: null,
       packageForm: emptyPackage(),
       wizardOpen: false,
       wizardStep: 1,
@@ -150,6 +151,7 @@ export default {
         running: '执行中',
         succeeded: '成功',
         failed: '失败',
+        rollback_queued: '等待回滚',
         rolling_back: '回滚中',
         rolled_back: '已回滚',
         cancelled: '已取消',
@@ -184,15 +186,43 @@ export default {
       this.error = ''
       this.busy = true
       try {
-        const item = await this.request('post', 'hosts', this.hostForm)
-        this.hosts.unshift(item)
+        const item = this.editingHostId
+          ? await this.request('put', `hosts/${this.editingHostId}`, this.hostForm)
+          : await this.request('post', 'hosts', this.hostForm)
+        if (this.editingHostId) {
+          const index = this.hosts.findIndex((host) => host.id === this.editingHostId)
+          if (index >= 0) this.hosts[index] = item
+        } else {
+          this.hosts.unshift(item)
+        }
         this.hostForm = emptyHost()
         this.hostTest = null
-        this.notice = '服务器已通过二次连接验证并保存，登录密码已加密存储。'
+        this.editingHostId = null
+        this.notice = '服务器已通过全新 SSH 连接验证并保存，登录密码已加密存储。'
       } catch (_) {
       } finally {
         this.busy = false
       }
+    },
+    editHost(host) {
+      this.editingHostId = host.id
+      this.hostForm = {
+        name: host.name,
+        address: host.address,
+        ssh_port: host.ssh_port,
+        ssh_user: host.ssh_user,
+        ssh_password: '',
+        use_sudo: host.use_sudo,
+        sudo_password: '',
+      }
+      this.hostTest = null
+      this.error = ''
+      this.notice = '请输入当前有效密码；平台不会回显已保存的密码。'
+    },
+    cancelEditHost() {
+      this.editingHostId = null
+      this.hostForm = emptyHost()
+      this.hostTest = null
     },
     choosePackageFile(event) {
       this.packageForm.file = event.target.files[0]
@@ -389,6 +419,26 @@ export default {
       this.notice = `重试任务“${retry.name}”已创建，请点击“开始部署”。`
       await this.refresh()
     },
+    canRetryTask(task) {
+      return task.status === 'rolled_back'
+        || (task.status === 'failed' && task.rollback_result?.includes('预检失败'))
+    },
+    needsRollback(task) {
+      return task.status === 'failed' && !task.rollback_result?.includes('预检失败')
+    },
+    async rollbackTask(task) {
+      this.busy = true
+      this.error = ''
+      try {
+        const queued = await this.request('post', `deployments/${task.id}/rollback`)
+        const index = this.deployments.findIndex((item) => item.id === task.id)
+        if (index >= 0) this.deployments[index] = queued
+        await this.openExecution(queued, true)
+      } catch (_) {
+      } finally {
+        this.busy = false
+      }
+    },
     async loadAuditLogs() {
       this.active = 'audit'
       this.auditLogs = await this.request('get', 'audit-logs')
@@ -488,8 +538,8 @@ export default {
 
       <section v-if="active === 'hosts'" class="two-col">
         <form class="panel form" @submit.prevent="createHost">
-          <h2>登记服务器</h2>
-          <p class="muted">平台仅使用用户名和密码登录，保存前必须再次完成连接验证。</p>
+          <h2>{{ editingHostId ? '更新服务器凭据' : '登记服务器' }}</h2>
+          <p class="muted">平台仅使用用户名和密码登录，每次保存都会禁用旧连接缓存并重新验证密码。</p>
           <label>服务器名称<input v-model="hostForm.name" required placeholder="middleware-node-01" /></label>
           <label>IP 地址或主机名<input v-model="hostForm.address" required placeholder="10.0.0.11" /></label>
           <div class="row two">
@@ -501,7 +551,8 @@ export default {
           <label v-if="hostForm.use_sudo">sudo 密码<input v-model="hostForm.sudo_password" type="password" placeholder="留空时使用 SSH 登录密码" /></label>
           <div class="action-row">
             <button type="button" class="secondary" :disabled="busy" @click="testHost">测试连接</button>
-            <button :disabled="busy || !isOperator">验证并保存</button>
+            <button v-if="editingHostId" type="button" class="secondary" :disabled="busy" @click="cancelEditHost">取消编辑</button>
+            <button :disabled="busy || !isOperator">{{ editingHostId ? '验证并更新' : '验证并保存' }}</button>
           </div>
           <div v-if="hostTest?.success" class="test-result">
             <b>连接检查通过</b>
@@ -511,10 +562,10 @@ export default {
         </form>
         <div class="panel">
           <h2>服务器资产</h2>
-          <table><thead><tr><th>名称</th><th>连接地址</th><th>系统</th><th>状态</th></tr></thead>
+          <table><thead><tr><th>名称</th><th>连接地址</th><th>系统</th><th>状态</th><th>操作</th></tr></thead>
             <tbody>
-              <tr v-for="host in hosts" :key="host.id"><td><b>{{ host.name }}</b><small>{{ host.ssh_user }}{{ host.use_sudo ? ' + sudo' : '' }}</small></td><td>{{ host.address }}:{{ host.ssh_port }}</td><td>{{ host.os_family }} {{ host.os_version }}<small>{{ host.architecture }}</small></td><td><span class="status succeeded">已验证</span></td></tr>
-              <tr v-if="!hosts.length"><td colspan="4" class="muted">暂无服务器，请先完成连接测试并保存。</td></tr>
+              <tr v-for="host in hosts" :key="host.id"><td><b>{{ host.name }}</b><small>{{ host.ssh_user }}{{ host.use_sudo ? ' + sudo' : '' }}</small></td><td>{{ host.address }}:{{ host.ssh_port }}</td><td>{{ host.os_family }} {{ host.os_version }}<small>{{ host.architecture }}</small></td><td><span class="status succeeded">已验证</span></td><td><button class="link" :disabled="busy || !isOperator" @click="editHost(host)">更新凭据</button></td></tr>
+              <tr v-if="!hosts.length"><td colspan="5" class="muted">暂无服务器，请先完成连接测试并保存。</td></tr>
             </tbody>
           </table>
         </div>
@@ -623,7 +674,7 @@ export default {
         <h2>部署任务</h2>
         <table><thead><tr><th>任务</th><th>中间件/模式</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
           <tbody>
-            <tr v-for="task in deployments" :key="task.id"><td><b>{{ task.name }}</b><small>{{ task.id }}</small></td><td>{{ componentName(task.component) }}<small>{{ task.mode === 'standalone' ? '单机模式' : '集群模式' }}</small></td><td><span class="status" :class="task.status">{{ statusLabel(task.status) }}</span></td><td>{{ new Date(task.created_at).toLocaleString() }}</td><td><button v-if="task.status === 'draft' && isOperator" :disabled="busy" @click="startTask(task)">开始部署</button><button v-else class="link" @click="openExecution(task, !isTerminal(task.status))">{{ isTerminal(task.status) ? '查看记录' : '进入部署' }}</button><button v-if="['failed','rolled_back'].includes(task.status) && isOperator" class="link" @click="retryTask(task)">创建重试任务</button></td></tr>
+            <tr v-for="task in deployments" :key="task.id"><td><b>{{ task.name }}</b><small>{{ task.id }}</small></td><td>{{ componentName(task.component) }}<small>{{ task.mode === 'standalone' ? '单机模式' : '集群模式' }}</small></td><td><span class="status" :class="task.status">{{ statusLabel(task.status) }}</span></td><td>{{ new Date(task.created_at).toLocaleString() }}</td><td><button v-if="task.status === 'draft' && isOperator" :disabled="busy" @click="startTask(task)">开始部署</button><button v-else class="link" @click="openExecution(task, !isTerminal(task.status))">{{ isTerminal(task.status) ? '查看记录' : '进入部署' }}</button><button v-if="needsRollback(task) && isOperator" class="link" :disabled="busy" @click="rollbackTask(task)">重新回滚</button><button v-if="canRetryTask(task) && isOperator" class="link" @click="retryTask(task)">创建重试任务</button></td></tr>
             <tr v-if="!deployments.length"><td colspan="5" class="muted">暂无部署任务。</td></tr>
           </tbody>
         </table>
@@ -640,7 +691,7 @@ export default {
 <style>
 .status.running,.status.queued{background:#fff3dd;color:#a76700}
 .status.draft{background:#e9eef8;color:#596a88}
-.status.rolling_back{background:#fff0db;color:#9b5a00}
+.status.rollback_queued,.status.rolling_back{background:#fff0db;color:#9b5a00}
 .execution-shell{min-height:100vh;background:#0c1425;color:#e8eefb;padding:30px 42px;display:flex;flex-direction:column}
 .execution-header{margin:0 auto 24px;width:min(1320px,100%);color:#fff}
 .execution-header h1{font-size:28px;margin-top:7px}

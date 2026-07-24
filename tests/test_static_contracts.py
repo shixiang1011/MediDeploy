@@ -32,6 +32,8 @@ class StaticContractTests(unittest.TestCase):
             self.assertIn(backend_route, backend)
         self.assertIn('@app.get("/api/health")', backend)
         self.assertIn('@app.post("/api/deployments/{deployment_id}/start"', backend)
+        self.assertIn('@app.put("/api/hosts/{host_id}")', backend)
+        self.assertIn('@app.post("/api/deployments/{deployment_id}/rollback"', backend)
 
     def test_frontend_is_extensible_simplified_chinese_wizard(self):
         frontend = (ROOT / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
@@ -152,7 +154,9 @@ class StaticContractTests(unittest.TestCase):
         self.assertIn('"redis_rollback.yml"', worker)
         self.assertIn("return preflight_result, None", worker)
         self.assertIn("def recover_interrupted_tasks()", worker)
+        self.assertIn("def run_rollback_task(", worker)
         self.assertIn("rollback_only=True", worker)
+        self.assertIn("TaskStatus.ROLLBACK_QUEUED", worker)
         self.assertIn("TaskStatus.ROLLING_BACK", worker)
         self.assertIn("recover_interrupted_tasks()", worker)
         self.assertIn("Worker 异常后的保护性回滚失败", worker)
@@ -166,12 +170,40 @@ class StaticContractTests(unittest.TestCase):
         self.assertIn('Path(settings().packages_dir) / ".ssh_known_hosts"', probe)
         self.assertIn("StrictHostKeyChecking=accept-new", probe)
         self.assertIn('"ansible_ssh_retries": 3', probe)
+        self.assertIn('"ansible_python_interpreter": "/usr/bin/python3"', probe)
+        self.assertIn("ControlMaster=no", probe)
+        self.assertIn("ControlPersist=no", probe)
+
+    def test_deployment_uses_fresh_task_scoped_persistent_ssh_pool(self):
+        worker = (ROOT / "backend" / "app" / "worker.py").read_text(encoding="utf-8")
+        self.assertIn('"ANSIBLE_SSH_CONTROL_PATH_DIR"', worker)
+        self.assertIn("ssh-control", worker)
+        self.assertIn("ControlMaster=auto", worker)
+        self.assertIn("ControlPersist=15m", worker)
 
     def test_migrations_run_before_api_and_worker_waits_for_health(self):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         self.assertIn("alembic upgrade head", compose)
         self.assertIn("condition: service_healthy", compose)
         self.assertTrue((ROOT / "backend" / "migrations" / "env.py").is_file())
+        rollback_migration = (
+            ROOT
+            / "backend"
+            / "migrations"
+            / "versions"
+            / "20260724_0003_rollback_queued_status.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"ROLLBACK_QUEUED"', rollback_migration)
+
+    def test_failed_tasks_can_retry_exact_rollback_before_redeployment(self):
+        models = (ROOT / "backend" / "app" / "models.py").read_text(encoding="utf-8")
+        api = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+        frontend = (ROOT / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
+        self.assertIn('ROLLBACK_QUEUED = "rollback_queued"', models)
+        self.assertIn("deployment.status = TaskStatus.ROLLBACK_QUEUED", api)
+        self.assertIn("重新回滚", frontend)
+        self.assertIn("更新凭据", frontend)
+        self.assertIn("needsRollback(task)", frontend)
 
     def test_ansible_does_not_invoke_recursive_rm(self):
         ansible_text = "\n".join(

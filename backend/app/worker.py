@@ -21,19 +21,26 @@ def add_log(deployment_id: str, message: str, level: str = "INFO") -> None:
         db.commit()
 
 
-def claim_task() -> str | None:
+def claim_task() -> tuple[str, str] | None:
     with SessionLocal.begin() as db:
         task = db.scalar(
             select(Deployment)
-            .where(Deployment.status == TaskStatus.QUEUED)
+            .where(
+                Deployment.status.in_(
+                    (TaskStatus.QUEUED, TaskStatus.ROLLBACK_QUEUED)
+                )
+            )
             .order_by(Deployment.created_at)
             .with_for_update(skip_locked=True)
             .limit(1)
         )
         if not task:
             return None
+        if task.status == TaskStatus.ROLLBACK_QUEUED:
+            task.status = TaskStatus.ROLLING_BACK
+            return task.id, "rollback"
         task.status = TaskStatus.RUNNING
-        return task.id
+        return task.id, "deploy"
 
 
 def run_task(task_id: str) -> None:
@@ -209,6 +216,12 @@ def call_ansible(
 
         process_env = os.environ.copy()
         process_env["ANSIBLE_ROLES_PATH"] = str(Path(settings().ansible_dir) / "roles")
+        ssh_control_path_dir = root / "ssh-control"
+        ssh_control_path_dir.mkdir(mode=0o700)
+        process_env["ANSIBLE_SSH_CONTROL_PATH_DIR"] = str(ssh_control_path_dir)
+        process_env["ANSIBLE_SSH_ARGS"] = (
+            "-C -o ControlMaster=auto -o ControlPersist=15m"
+        )
         if rollback_only:
             rollback_result = stream_playbook(
                 task_id,
@@ -295,6 +308,71 @@ def stream_playbook(
     return process.wait()
 
 
+def run_rollback_task(task_id: str, reason: str) -> None:
+    with SessionLocal() as db:
+        task = db.get(Deployment, task_id)
+        if not task:
+            return
+        package = db.get(Package, task.package_id)
+        config = dict(task.config)
+        host_ids = {item["host_id"] for item in config.get("instances", [])}
+        hosts = db.scalars(select(Host).where(Host.id.in_(host_ids))).all()
+        hosts_by_id = {host.id: host for host in hosts}
+        task.status = TaskStatus.ROLLING_BACK
+        db.commit()
+
+    add_log(task_id, reason, "WARN")
+    if (
+        not package
+        or not config.get("instances")
+        or len(hosts_by_id) != len(host_ids)
+    ):
+        rollback_result = 1
+        add_log(
+            task_id,
+            "任务缺少软件包、实例或服务器记录，无法自动构建完整回滚清单",
+            "ERROR",
+        )
+    else:
+        try:
+            _, rollback_result = call_ansible(
+                task_id,
+                package,
+                config,
+                hosts_by_id,
+                rollback_only=True,
+            )
+        except Exception as exc:
+            rollback_result = 1
+            add_log(task_id, f"精确资源回滚异常：{exc}", "ERROR")
+
+    with SessionLocal() as db:
+        task = db.get(Deployment, task_id)
+        if not task:
+            return
+        if rollback_result == 0:
+            task.status = TaskStatus.ROLLED_BACK
+            task.rollback_result = "已按原任务资源清单完成回滚"
+            db.add(
+                TaskLog(
+                    deployment_id=task_id,
+                    message="原任务资源已清理完成，可以安全创建重试任务",
+                    level="ERROR",
+                )
+            )
+        else:
+            task.status = TaskStatus.FAILED
+            task.rollback_result = "回滚仍未完全成功，请检查失联服务器后再次执行回滚"
+            db.add(
+                TaskLog(
+                    deployment_id=task_id,
+                    message="精确资源回滚未完全成功，请修复服务器连接后再次执行回滚",
+                    level="ERROR",
+                )
+            )
+        db.commit()
+
+
 def recover_interrupted_tasks() -> None:
     """Roll back tasks whose worker disappeared before recording a final state."""
     with SessionLocal() as db:
@@ -311,87 +389,26 @@ def recover_interrupted_tasks() -> None:
         )
 
     for task_id in interrupted_ids:
-        with SessionLocal() as db:
-            task = db.get(Deployment, task_id)
-            if not task or task.status not in (
-                TaskStatus.RUNNING,
-                TaskStatus.ROLLING_BACK,
-            ):
-                continue
-            package = db.get(Package, task.package_id)
-            config = dict(task.config)
-            host_ids = {item["host_id"] for item in config.get("instances", [])}
-            hosts = db.scalars(select(Host).where(Host.id.in_(host_ids))).all()
-            hosts_by_id = {host.id: host for host in hosts}
-            task.status = TaskStatus.ROLLING_BACK
-            db.commit()
-
-        add_log(
+        run_rollback_task(
             task_id,
             "检测到 Worker 重启导致任务执行中断，开始清理该任务已创建的精确资源",
-            "WARN",
         )
-
-        if (
-            not package
-            or not config.get("instances")
-            or len(hosts_by_id) != len(host_ids)
-        ):
-            rollback_result = 1
-            add_log(
-                task_id,
-                "中断任务缺少软件包、实例或服务器记录，无法自动构建完整回滚清单",
-                "ERROR",
-            )
-        else:
-            try:
-                _, rollback_result = call_ansible(
-                    task_id,
-                    package,
-                    config,
-                    hosts_by_id,
-                    rollback_only=True,
-                )
-            except Exception as exc:
-                rollback_result = 1
-                add_log(task_id, f"中断任务自动回滚异常：{exc}", "ERROR")
-
-        with SessionLocal() as db:
-            task = db.get(Deployment, task_id)
-            if not task:
-                continue
-            if rollback_result == 0:
-                task.status = TaskStatus.ROLLED_BACK
-                task.rollback_result = "Worker 重启中断部署，已完成自动回滚"
-                db.add(
-                    TaskLog(
-                        deployment_id=task_id,
-                        message="中断任务已清理完成，可以重新创建或重试部署任务",
-                        level="ERROR",
-                    )
-                )
-            else:
-                task.status = TaskStatus.FAILED
-                task.rollback_result = (
-                    "Worker 重启中断部署，自动回滚未完全成功，请根据日志人工核验"
-                )
-                db.add(
-                    TaskLog(
-                        deployment_id=task_id,
-                        message="中断任务自动回滚未完全成功，请人工核验任务资源清单",
-                        level="ERROR",
-                    )
-                )
-            db.commit()
 
 
 def main() -> None:
     recover_interrupted_tasks()
     while True:
         try:
-            task_id = claim_task()
-            if task_id:
-                run_task(task_id)
+            claimed = claim_task()
+            if claimed:
+                task_id, action = claimed
+                if action == "rollback":
+                    run_rollback_task(
+                        task_id,
+                        "操作人员请求重新回滚，开始按原任务资源清单清理",
+                    )
+                else:
+                    run_task(task_id)
             else:
                 time.sleep(settings().task_poll_seconds)
         except Exception as exc:

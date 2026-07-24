@@ -44,6 +44,7 @@ def connection_inventory_vars(
         "ansible_user": user,
         "ansible_password": password,
         "ansible_connection": "ssh",
+        "ansible_python_interpreter": "/usr/bin/python3",
         "ansible_ssh_retries": 3,
         "ansible_ssh_common_args": (
             "-o StrictHostKeyChecking=accept-new "
@@ -87,13 +88,17 @@ def probe_host(connection: HostConnection) -> dict:
             "-a",
             FACT_COMMAND,
         ]
+        process_env = os.environ.copy()
+        process_env["ANSIBLE_SSH_ARGS"] = (
+            "-C -o ControlMaster=no -o ControlPersist=no"
+        )
         process = subprocess.run(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             timeout=40,
-            env=os.environ.copy(),
+            env=process_env,
             check=False,
         )
         if process.returncode != 0:

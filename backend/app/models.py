@@ -25,6 +25,7 @@ class TaskStatus(str, enum.Enum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    ROLLBACK_QUEUED = "rollback_queued"
     ROLLING_BACK = "rolling_back"
     ROLLED_BACK = "rolled_back"
     CANCELLED = "cancelled"
