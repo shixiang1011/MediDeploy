@@ -120,6 +120,8 @@
     chdir: "{{ redis_source_dirs.files[0].path }}"
   environment:
     HOME: "{{ redis_install_path }}"
+  vars:
+    ansible_async_dir: "{{ redis_install_path }}/.ansible_async"
   async: 1800
   poll: 0
   register: redis_build_job
@@ -128,6 +130,8 @@
 - name: Wait for Redis source build (30 minute limit)
   ansible.builtin.async_status:
     jid: "{{ redis_build_job.ansible_job_id }}"
+  vars:
+    ansible_async_dir: "{{ redis_install_path }}/.ansible_async"
   register: redis_build_result
   until: redis_build_result.finished
   retries: 180
