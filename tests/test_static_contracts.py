@@ -26,6 +26,7 @@ class StaticContractTests(unittest.TestCase):
         ):
             self.assertIn(frontend_path, frontend)
             self.assertIn(backend_route, backend)
+        self.assertIn('@app.get("/api/health")', backend)
 
     def test_frontend_is_extensible_simplified_chinese_wizard(self):
         frontend = (ROOT / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")

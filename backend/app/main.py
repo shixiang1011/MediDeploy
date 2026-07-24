@@ -131,6 +131,7 @@ def tenant_query(model, user: User):
 
 
 @app.get("/health")
+@app.get("/api/health")
 def health():
     return {"status": "ok", "service": "SPMP"}
 
