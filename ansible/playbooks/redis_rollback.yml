@@ -2,7 +2,6 @@
 - name: Roll back exact Redis resources owned by this task
   hosts: redis
   gather_facts: false
-  serial: 1
   tasks:
     - name: Derive task-owned service and marker
       ansible.builtin.set_fact:

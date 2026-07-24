@@ -84,6 +84,16 @@ def run_task(task_id: str) -> None:
                     ),
                 )
             )
+        elif rollback_result is None:
+            task.status = TaskStatus.FAILED
+            task.rollback_result = "预检失败，未开始变更"
+            db.add(
+                TaskLog(
+                    deployment_id=task_id,
+                    message="预检失败，未对任何目标服务器执行安装或配置变更",
+                    level="ERROR",
+                )
+            )
         elif rollback_result == 0:
             task.status = TaskStatus.ROLLED_BACK
             task.rollback_result = "部署失败，已按任务资源清单完成自动回滚"
@@ -119,7 +129,7 @@ def call_ansible(
     package: Package,
     config: dict,
     hosts_by_id: dict[str, Host],
-) -> tuple[int, int]:
+) -> tuple[int, int | None]:
     with tempfile.TemporaryDirectory(prefix="spmp-task-") as temp_dir:
         root = Path(temp_dir)
         inventory_hosts = {}
@@ -150,7 +160,13 @@ def call_ansible(
                 }
             )
             inventory_hosts[inventory_name] = connection
-            redis_nodes.append({"address": host.address, "port": instance["port"]})
+            redis_nodes.append(
+                {
+                    "address": host.address,
+                    "port": instance["port"],
+                    "bus_port": instance["port"] + 10000,
+                }
+            )
 
         inventory = {"all": {"children": {"redis": {"hosts": inventory_hosts}}}}
         inventory_path = root / "inventory.json"
@@ -176,6 +192,22 @@ def call_ansible(
 
         process_env = os.environ.copy()
         process_env["ANSIBLE_ROLES_PATH"] = str(Path(settings().ansible_dir) / "roles")
+        preflight_result = stream_playbook(
+            task_id,
+            inventory_path,
+            vars_path,
+            Path(settings().ansible_dir) / "playbooks" / "redis_preflight.yml",
+            process_env,
+        )
+        if preflight_result != 0:
+            add_log(
+                task_id,
+                "预检未通过，平台确认尚未开始任何安装或配置变更，因此不执行回滚",
+                "ERROR",
+            )
+            return preflight_result, None
+
+        add_log(task_id, "全部实例预检通过，开始分发、安装和启动 Redis")
         deploy_result = stream_playbook(
             task_id,
             inventory_path,

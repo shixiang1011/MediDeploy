@@ -69,13 +69,17 @@ class StaticContractTests(unittest.TestCase):
 
     def test_redis_playbook_preflights_before_install_and_supports_binary(self):
         playbook = (ROOT / "ansible" / "playbooks" / "redis.yml").read_text(encoding="utf-8")
+        preflight = (
+            ROOT / "ansible" / "playbooks" / "redis_preflight.yml"
+        ).read_text(encoding="utf-8")
         tasks = (ROOT / "ansible" / "roles" / "redis" / "tasks" / "main.yml").read_text(
             encoding="utf-8"
         )
-        self.assertLess(
-            playbook.index("Preflight every Redis instance"),
-            playbook.index("Install and start every Redis instance"),
-        )
+        self.assertIn("Preflight every Redis instance", preflight)
+        self.assertIn("Wait for SSH and Python to become reachable", preflight)
+        self.assertNotIn("Install and start every Redis instance", preflight)
+        self.assertNotIn("Preflight every Redis instance", playbook)
+        self.assertIn("Install and start every Redis instance", playbook)
         self.assertIn("redis_package_type == 'source'", tasks)
         self.assertIn("redis_package_type == 'binary'", tasks)
         self.assertIn('- "{{ redis_install_path }}/bin"', tasks)
@@ -84,14 +88,18 @@ class StaticContractTests(unittest.TestCase):
         self.assertIn("REDISCLI_AUTH", tasks)
         self.assertIn("Collect Redis application log after a verification failure", tasks)
         self.assertNotIn('host: "{{ redis_advertise_address }}"', tasks)
-        self.assertIn("setfacl", playbook)
+        self.assertIn("setfacl", preflight)
         self.assertIn("Grant only this Redis service user traversal", tasks)
+        self.assertIn("Verify every Redis client port", playbook)
+        self.assertIn("Verify every Redis Cluster Bus port", playbook)
+        self.assertIn("Verify Redis Cluster reaches the healthy state", playbook)
 
         rollback = (
             ROOT / "ansible" / "playbooks" / "redis_rollback.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("Revoke this task service user's parent traversal ACLs", rollback)
         self.assertIn("- -x", rollback)
+        self.assertNotIn("serial: 1", rollback)
 
         service = (
             ROOT / "ansible" / "roles" / "redis" / "templates" / "redis.service.j2"
@@ -132,7 +140,10 @@ class StaticContractTests(unittest.TestCase):
 
     def test_worker_runs_explicit_rollback_playbook(self):
         worker = (ROOT / "backend" / "app" / "worker.py").read_text(encoding="utf-8")
+        self.assertIn('"redis_preflight.yml"', worker)
         self.assertIn('"redis_rollback.yml"', worker)
+        self.assertIn("return preflight_result, None", worker)
+        self.assertIn("预检失败，未开始变更", worker)
         self.assertIn('process_env["ANSIBLE_ROLES_PATH"]', worker)
         self.assertIn("ssh_password_encrypted", worker)
         self.assertNotIn("ssh_private_key", worker)
@@ -141,6 +152,7 @@ class StaticContractTests(unittest.TestCase):
         probe = (ROOT / "backend" / "app" / "host_probe.py").read_text(encoding="utf-8")
         self.assertIn('Path(settings().packages_dir) / ".ssh_known_hosts"', probe)
         self.assertIn("StrictHostKeyChecking=accept-new", probe)
+        self.assertIn('"ansible_ssh_retries": 3', probe)
 
     def test_migrations_run_before_api_and_worker_waits_for_health(self):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")

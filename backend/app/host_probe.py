@@ -44,6 +44,7 @@ def connection_inventory_vars(
         "ansible_user": user,
         "ansible_password": password,
         "ansible_connection": "ssh",
+        "ansible_ssh_retries": 3,
         "ansible_ssh_common_args": (
             "-o StrictHostKeyChecking=accept-new "
             f"-o UserKnownHostsFile={known_hosts}"
