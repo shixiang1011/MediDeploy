@@ -4,6 +4,7 @@ import os
 import subprocess
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import select
@@ -12,6 +13,7 @@ from app.config import settings
 from app.database import SessionLocal
 from app.host_probe import connection_inventory_vars
 from app.models import Deployment, Host, Package, TaskLog, TaskStatus
+from app.report_generator import build_report, report_path_for
 from app.security import decrypt
 
 
@@ -97,6 +99,35 @@ def run_task(task_id: str) -> None:
         if deploy_result == 0:
             task.status = TaskStatus.SUCCEEDED
             task.rollback_result = None
+            snapshot = dict(task.report_snapshot or {})
+            if snapshot:
+                completed_at = datetime.utcnow()
+                snapshot["completed_at"] = completed_at.strftime("%Y-%m-%d %H:%M:%S")
+                task.report_snapshot = snapshot
+                try:
+                    report_path = report_path_for(task.id)
+                    build_report(
+                        snapshot,
+                        redis_password=decrypt(config["redis_password"]),
+                        output_path=report_path,
+                        generated_at=completed_at,
+                    )
+                    task.report_path = str(report_path)
+                    task.report_generated_at = completed_at
+                    db.add(
+                        TaskLog(
+                            deployment_id=task_id,
+                            message="Word 交付报告已生成，可在任务列表中重复下载",
+                        )
+                    )
+                except Exception as exc:
+                    db.add(
+                        TaskLog(
+                            deployment_id=task_id,
+                            message=f"部署成功，但 Word 报告生成失败，可稍后从任务列表重新生成：{exc}",
+                            level="WARN",
+                        )
+                    )
             db.add(
                 TaskLog(
                     deployment_id=task_id,

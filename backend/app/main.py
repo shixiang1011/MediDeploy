@@ -4,9 +4,10 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from ldap3 import ALL, Connection, Server
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -36,6 +37,7 @@ from app.schemas import (
     TenantCreate,
     UserCreate,
 )
+from app.report_generator import build_report, report_path_for
 from app.security import decrypt, encrypt, password_hash, password_matches, token_for, token_subject
 
 
@@ -230,10 +232,26 @@ def test_host_connection(
 
 
 @app.get("/api/hosts")
-def list_hosts(user: User = Depends(current_user), db: Session = Depends(get_db)):
+def list_hosts(
+    q: str | None = None,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    statement = tenant_query(Host, user).where(Host.enabled.is_(True))
+    if q and (term := q.strip()):
+        pattern = f"%{term}%"
+        statement = statement.where(
+            or_(
+                Host.name.ilike(pattern),
+                Host.address.ilike(pattern),
+                Host.ssh_user.ilike(pattern),
+                Host.os_family.ilike(pattern),
+                Host.os_version.ilike(pattern),
+            )
+        )
     return [
         host_view(item)
-        for item in db.scalars(tenant_query(Host, user).order_by(Host.created_at.desc())).all()
+        for item in db.scalars(statement.order_by(Host.created_at.desc())).all()
     ]
 
 
@@ -249,27 +267,51 @@ def create_host(
         facts = probe_host(body)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"保存前连接测试失败：{str(exc)[-2000:]}")
-    host = Host(
-        tenant_id=user.tenant_id,
-        name=body.name,
-        address=body.address,
-        ssh_port=body.ssh_port,
-        ssh_user=body.ssh_user,
-        ssh_password_encrypted=encrypt(body.ssh_password),
-        use_sudo=body.use_sudo,
-        sudo_password_encrypted=encrypt(body.sudo_password or body.ssh_password)
-        if body.use_sudo
-        else None,
-        os_family=facts["os_family"],
-        os_version=facts["os_version"],
-        architecture=facts["architecture"],
-        facts=facts,
-        connection_status="verified",
-        last_tested_at=datetime.utcnow(),
+    host = db.scalar(
+        select(Host).where(
+            Host.tenant_id == user.tenant_id,
+            Host.address == body.address,
+            Host.ssh_port == body.ssh_port,
+        )
     )
-    db.add(host)
+    restored = bool(host and not host.enabled)
+    if host and host.enabled:
+        raise HTTPException(status_code=409, detail="该租户已登记相同的服务器地址和 SSH 端口")
+    if host is None:
+        host = Host(
+            tenant_id=user.tenant_id,
+            address=body.address,
+            ssh_port=body.ssh_port,
+            ssh_user=body.ssh_user,
+            ssh_password_encrypted=encrypt(body.ssh_password),
+            os_family=facts["os_family"],
+            os_version=facts["os_version"],
+            architecture=facts["architecture"],
+        )
+        db.add(host)
+    host.name = body.name
+    host.ssh_user = body.ssh_user
+    host.ssh_password_encrypted = encrypt(body.ssh_password)
+    host.use_sudo = body.use_sudo
+    host.sudo_password_encrypted = (
+        encrypt(body.sudo_password or body.ssh_password) if body.use_sudo else None
+    )
+    host.os_family = facts["os_family"]
+    host.os_version = facts["os_version"]
+    host.architecture = facts["architecture"]
+    host.facts = facts
+    host.connection_status = "verified"
+    host.last_tested_at = datetime.utcnow()
+    host.enabled = True
     db.flush()
-    audit(db, user, "create", "host", host.id, {"address": host.address, "ssh_user": host.ssh_user})
+    audit(
+        db,
+        user,
+        "restore" if restored else "create",
+        "host",
+        host.id,
+        {"address": host.address, "ssh_user": host.ssh_user},
+    )
     try:
         db.commit()
     except IntegrityError:
@@ -286,7 +328,11 @@ def update_host(
     db: Session = Depends(get_db),
 ):
     host = db.get(Host, host_id)
-    if not host or (user.role != Role.SUPER_ADMIN and host.tenant_id != user.tenant_id):
+    if (
+        not host
+        or not host.enabled
+        or (user.role != Role.SUPER_ADMIN and host.tenant_id != user.tenant_id)
+    ):
         raise HTTPException(status_code=404, detail="未找到服务器资产")
     try:
         facts = probe_host(body)
@@ -325,6 +371,44 @@ def update_host(
     return host_view(host)
 
 
+@app.delete("/api/hosts/{host_id}", status_code=204)
+def delete_host(
+    host_id: str,
+    user: User = Depends(require(Role.SUPER_ADMIN, Role.TENANT_ADMIN, Role.OPERATOR)),
+    db: Session = Depends(get_db),
+):
+    host = db.get(Host, host_id)
+    if (
+        not host
+        or not host.enabled
+        or (user.role != Role.SUPER_ADMIN and host.tenant_id != user.tenant_id)
+    ):
+        raise HTTPException(status_code=404, detail="未找到服务器资产")
+    active_statuses = (
+        TaskStatus.DRAFT,
+        TaskStatus.QUEUED,
+        TaskStatus.RUNNING,
+        TaskStatus.ROLLBACK_QUEUED,
+        TaskStatus.ROLLING_BACK,
+    )
+    active_deployments = db.scalars(
+        tenant_query(Deployment, user).where(
+            Deployment.deleted_at.is_(None),
+            Deployment.status.in_(active_statuses),
+        )
+    ).all()
+    if any(
+        instance.get("host_id") == host.id
+        for deployment in active_deployments
+        for instance in deployment.config.get("instances", [])
+    ):
+        raise HTTPException(status_code=409, detail="该服务器仍被未完成任务引用，不能删除")
+    host.enabled = False
+    host.connection_status = "removed"
+    audit(db, user, "delete", "host", host.id, {"address": host.address})
+    db.commit()
+
+
 def host_view(host: Host) -> dict:
     return {
         "id": host.id,
@@ -346,15 +430,27 @@ def host_view(host: Host) -> dict:
 @app.get("/api/packages")
 def list_packages(
     component: str | None = None,
+    q: str | None = None,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    statement = select(Package)
+    statement = select(Package).where(Package.enabled.is_(True))
     if component:
         statement = statement.where(Package.component == component.lower())
     if user.role != Role.SUPER_ADMIN:
         statement = statement.where(
             (Package.tenant_id == user.tenant_id) | (Package.tenant_id.is_(None))
+        )
+    if q and (term := q.strip()):
+        pattern = f"%{term}%"
+        statement = statement.where(
+            or_(
+                Package.component.ilike(pattern),
+                Package.version.ilike(pattern),
+                Package.filename.ilike(pattern),
+                Package.description.ilike(pattern),
+                Package.architecture.ilike(pattern),
+            )
         )
     return [
         package_view(item)
@@ -417,6 +513,64 @@ async def upload_package(
     return package_view(package)
 
 
+@app.delete("/api/packages/{package_id}", status_code=204)
+def delete_package(
+    package_id: str,
+    user: User = Depends(require(Role.SUPER_ADMIN, Role.TENANT_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    package = db.get(Package, package_id)
+    if (
+        not package
+        or not package.enabled
+        or (package.tenant_id is None and user.role != Role.SUPER_ADMIN)
+        or (
+            package.tenant_id is not None
+            and user.role != Role.SUPER_ADMIN
+            and package.tenant_id != user.tenant_id
+        )
+    ):
+        raise HTTPException(status_code=404, detail="未找到软件包")
+    active_statuses = (
+        TaskStatus.DRAFT,
+        TaskStatus.QUEUED,
+        TaskStatus.RUNNING,
+        TaskStatus.ROLLBACK_QUEUED,
+        TaskStatus.ROLLING_BACK,
+    )
+    active_reference = db.scalar(
+        select(Deployment.id)
+        .where(
+            Deployment.package_id == package.id,
+            Deployment.deleted_at.is_(None),
+            Deployment.status.in_(active_statuses),
+        )
+        .limit(1)
+    )
+    if active_reference:
+        raise HTTPException(status_code=409, detail="软件包仍被未完成任务引用，不能删除")
+
+    package_root = Path(settings().packages_dir).resolve()
+    package_path = Path(package.storage_path).resolve()
+    if package_path.parent != package_root:
+        raise HTTPException(status_code=409, detail="软件包存储路径不在平台受控目录，拒绝删除")
+    try:
+        package_path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"删除软件包文件失败：{exc}")
+    package.enabled = False
+    package.deleted_at = datetime.utcnow()
+    audit(
+        db,
+        user,
+        "delete",
+        "package",
+        package.id,
+        {"filename": package.filename, "component": package.component},
+    )
+    db.commit()
+
+
 def package_view(item: Package) -> dict:
     return {
         "id": item.id,
@@ -426,7 +580,56 @@ def package_view(item: Package) -> dict:
         "package_type": item.package_type.value,
         "architecture": item.architecture,
         "description": item.description,
+        "is_global": item.tenant_id is None,
         "created_at": item.created_at,
+    }
+
+
+def make_report_snapshot(
+    deployment: Deployment,
+    package: Package,
+    config: dict,
+    hosts_by_id: dict[str, Host],
+) -> dict:
+    return {
+        "task_id": deployment.id,
+        "task_name": deployment.name,
+        "mode": deployment.mode.value,
+        "created_at": (deployment.created_at or datetime.utcnow()).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ),
+        "completed_at": "",
+        "package": {
+            "version": package.version,
+            "package_type": package.package_type.value,
+            "filename": package.filename,
+            "architecture": package.architecture,
+        },
+        "config": {
+            "primary_count": config["primary_count"],
+            "replicas_per_primary": config["replicas_per_primary"],
+            "appendonly": config["appendonly"],
+            "maxmemory": config.get("maxmemory"),
+            "maxmemory_policy": config["maxmemory_policy"],
+        },
+        "instances": [
+            {
+                "host_id": instance["host_id"],
+                "host_name": hosts_by_id[instance["host_id"]].name,
+                "address": hosts_by_id[instance["host_id"]].address,
+                "ssh_port": hosts_by_id[instance["host_id"]].ssh_port,
+                "redis_port": instance["port"],
+                "bus_port": instance["port"] + 10000,
+                "service_name": (
+                    f"spmp-redis-{deployment.id[:8]}-redis_{index:03d}"
+                ),
+                "install_dir": instance["install_dir"],
+                "data_dir": instance["data_dir"],
+                "log_dir": instance["log_dir"],
+                "config_dir": instance["config_dir"],
+            }
+            for index, instance in enumerate(config["instances"], 1)
+        ],
     }
 
 
@@ -441,6 +644,7 @@ def create_deployment(
     package = db.get(Package, body.package_id)
     if (
         not package
+        or not package.enabled
         or package.component != body.component
         or (package.tenant_id and package.tenant_id != user.tenant_id)
     ):
@@ -469,6 +673,13 @@ def create_deployment(
     )
     db.add(deployment)
     db.flush()
+    hosts_by_id = {host.id: host for host in hosts}
+    deployment.report_snapshot = make_report_snapshot(
+        deployment,
+        package,
+        body.config.model_dump(mode="json"),
+        hosts_by_id,
+    )
     db.add(TaskLog(deployment_id=deployment.id, message="任务配置已保存，等待操作人员开始部署"))
     audit(
         db,
@@ -487,12 +698,25 @@ def create_deployment(
 
 
 @app.get("/api/deployments")
-def list_deployments(user: User = Depends(current_user), db: Session = Depends(get_db)):
+def list_deployments(
+    q: str | None = None,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    statement = tenant_query(Deployment, user).where(Deployment.deleted_at.is_(None))
+    if q and (term := q.strip()):
+        pattern = f"%{term}%"
+        statement = statement.where(
+            or_(
+                Deployment.name.ilike(pattern),
+                Deployment.id.ilike(pattern),
+                Deployment.component.ilike(pattern),
+                Deployment.status.ilike(pattern),
+            )
+        )
     return [
         deployment_view(item)
-        for item in db.scalars(
-            tenant_query(Deployment, user).order_by(Deployment.created_at.desc())
-        ).all()
+        for item in db.scalars(statement.order_by(Deployment.created_at.desc())).all()
     ]
 
 
@@ -555,6 +779,23 @@ def retry_deployment(
     )
     if old.status != TaskStatus.ROLLED_BACK and not retryable_preflight_failure:
         raise HTTPException(status_code=409, detail="只有失败且已回滚的任务可以重试")
+    package = db.get(Package, old.package_id)
+    if (
+        not package
+        or not package.enabled
+        or not Path(package.storage_path).is_file()
+    ):
+        raise HTTPException(status_code=409, detail="原任务软件包已删除或文件不存在，不能创建重试任务")
+    host_ids = {item["host_id"] for item in old.config["instances"]}
+    hosts = db.scalars(
+        select(Host).where(Host.id.in_(host_ids), Host.enabled.is_(True))
+    ).all()
+    if (
+        len(hosts) != len(host_ids)
+        or any(host.tenant_id != old.tenant_id for host in hosts)
+        or any(host.connection_status != "verified" for host in hosts)
+    ):
+        raise HTTPException(status_code=409, detail="原任务包含已删除或未验证服务器，不能创建重试任务")
     retry = Deployment(
         tenant_id=old.tenant_id,
         name=f"{old.name}-retry",
@@ -567,6 +808,13 @@ def retry_deployment(
     )
     db.add(retry)
     db.flush()
+    hosts_by_id = {host.id: host for host in hosts}
+    retry.report_snapshot = make_report_snapshot(
+        retry,
+        package,
+        retry.config,
+        hosts_by_id,
+    )
     db.add(TaskLog(deployment_id=retry.id, message=f"重试任务已创建，等待手动开始；来源：{old.id}"))
     audit(db, user, "retry", "deployment", retry.id, {"source": old.id})
     db.commit()
@@ -596,10 +844,96 @@ def retry_deployment_rollback(
     return deployment_view(deployment)
 
 
+@app.delete("/api/deployments/{deployment_id}", status_code=204)
+def delete_deployment(
+    deployment_id: str,
+    user: User = Depends(require(Role.SUPER_ADMIN, Role.TENANT_ADMIN, Role.OPERATOR)),
+    db: Session = Depends(get_db),
+):
+    deployment = owned_deployment(db, deployment_id, user)
+    if deployment.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="未找到任务")
+    if deployment.status not in (
+        TaskStatus.SUCCEEDED,
+        TaskStatus.FAILED,
+        TaskStatus.ROLLED_BACK,
+        TaskStatus.CANCELLED,
+    ):
+        raise HTTPException(status_code=409, detail="只有已完成、失败或已回滚任务可以删除")
+    deployment.deleted_at = datetime.utcnow()
+    audit(
+        db,
+        user,
+        "delete",
+        "deployment",
+        deployment.id,
+        {"status": deployment.status.value, "name": deployment.name},
+    )
+    db.commit()
+
+
+@app.get("/api/deployments/{deployment_id}/report")
+def download_deployment_report(
+    deployment_id: str,
+    user: User = Depends(require(Role.SUPER_ADMIN, Role.TENANT_ADMIN, Role.OPERATOR)),
+    db: Session = Depends(get_db),
+):
+    deployment = owned_deployment(db, deployment_id, user)
+    if deployment.status != TaskStatus.SUCCEEDED:
+        raise HTTPException(status_code=409, detail="只有部署成功的任务可以下载交付报告")
+    snapshot = dict(deployment.report_snapshot or {})
+    package = db.get(Package, deployment.package_id)
+    if not package:
+        raise HTTPException(status_code=409, detail="报告关联的软件包记录不存在")
+    if not snapshot:
+        host_ids = {item["host_id"] for item in deployment.config["instances"]}
+        hosts = db.scalars(select(Host).where(Host.id.in_(host_ids))).all()
+        hosts_by_id = {host.id: host for host in hosts}
+        if len(hosts_by_id) != len(host_ids):
+            raise HTTPException(status_code=409, detail="历史任务的服务器快照信息不完整")
+        snapshot = make_report_snapshot(
+            deployment,
+            package,
+            deployment.config,
+            hosts_by_id,
+        )
+        deployment.report_snapshot = snapshot
+    report_path = report_path_for(deployment.id)
+    if not report_path.is_file():
+        snapshot["completed_at"] = (
+            deployment.updated_at.strftime("%Y-%m-%d %H:%M:%S")
+        )
+        build_report(
+            snapshot,
+            redis_password=decrypt(deployment.config["redis_password"]),
+            output_path=report_path,
+        )
+        deployment.report_path = str(report_path)
+        deployment.report_generated_at = datetime.utcnow()
+    audit(
+        db,
+        user,
+        "download",
+        "deployment_report",
+        deployment.id,
+        {"filename": report_path.name},
+    )
+    db.commit()
+    return FileResponse(
+        report_path,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ),
+        filename=f"SPMP-Redis-{deployment.id}.docx",
+    )
+
+
 def owned_deployment(db: Session, deployment_id: str, user: User) -> Deployment:
     deployment = db.get(Deployment, deployment_id)
-    if not deployment or (
-        user.role != Role.SUPER_ADMIN and deployment.tenant_id != user.tenant_id
+    if (
+        not deployment
+        or deployment.deleted_at is not None
+        or (user.role != Role.SUPER_ADMIN and deployment.tenant_id != user.tenant_id)
     ):
         raise HTTPException(status_code=404, detail="未找到任务")
     return deployment
@@ -624,6 +958,7 @@ def deployment_view(item: Deployment) -> dict:
         "created_at": item.created_at,
         "updated_at": item.updated_at,
         "rollback_result": item.rollback_result,
+        "report_available": item.status == TaskStatus.SUCCEEDED,
     }
 
 

@@ -218,6 +218,55 @@ class StaticContractTests(unittest.TestCase):
         self.assertIn("https://pypi.tuna.tsinghua.edu.cn/simple", dockerfile)
         self.assertIn("sshpass", dockerfile)
 
+    def test_catalogs_support_search_and_safe_deletion(self):
+        api = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+        frontend = (ROOT / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
+        for route in (
+            '@app.delete("/api/hosts/{host_id}"',
+            '@app.delete("/api/packages/{package_id}"',
+            '@app.delete("/api/deployments/{deployment_id}"',
+        ):
+            self.assertIn(route, api)
+        self.assertIn("q: str | None = None", api)
+        self.assertIn("package_path.unlink(missing_ok=True)", api)
+        self.assertIn("package_path.parent != package_root", api)
+        self.assertNotIn("subprocess.run([\"rm\"", api)
+        for label in ("搜索服务器", "搜索软件包", "搜索部署任务", "删除"):
+            self.assertIn(label, frontend)
+        self.assertIn("window.setInterval(() => this.refreshActiveList(), 15000)", frontend)
+        self.assertIn("Host.enabled.is_(True)", api)
+        self.assertIn("Deployment.deleted_at.is_(None)", api)
+
+    def test_successful_deployment_has_repeatable_word_report(self):
+        api = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+        worker = (ROOT / "backend" / "app" / "worker.py").read_text(encoding="utf-8")
+        report = (ROOT / "backend" / "app" / "report_generator.py").read_text(
+            encoding="utf-8"
+        )
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        requirements = (ROOT / "backend" / "requirements.txt").read_text(encoding="utf-8")
+        migration = (
+            ROOT
+            / "backend"
+            / "migrations"
+            / "versions"
+            / "20260724_0004_catalog_deletion_and_reports.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('@app.get("/api/deployments/{deployment_id}/report")', api)
+        self.assertIn("FileResponse(", api)
+        self.assertIn('"download"', api)
+        self.assertIn("build_report(", worker)
+        self.assertIn("Word 交付报告已生成", worker)
+        self.assertIn("敏感信息提示", report)
+        self.assertIn("Redis 密码", report)
+        self.assertIn("节点与端口", report)
+        self.assertIn("os.replace(temporary_path, output_path)", report)
+        self.assertIn("python-docx==", requirements)
+        self.assertIn("reports-data:/opt/spmp/reports", compose)
+        self.assertIn('"report_snapshot"', migration)
+        self.assertIn("下载 Word 报告", (ROOT / "frontend" / "src" / "App.vue").read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

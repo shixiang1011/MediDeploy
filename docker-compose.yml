@@ -25,9 +25,11 @@ services:
     environment:
       DATABASE_URL: mysql+pymysql://${MYSQL_USER:-spmp}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-spmp}
       PACKAGES_DIR: /opt/spmp/packages
+      REPORTS_DIR: /opt/spmp/reports
       ANSIBLE_DIR: /opt/spmp/ansible
     volumes:
       - packages-data:/opt/spmp/packages
+      - reports-data:/opt/spmp/reports
       - ./ansible:/opt/spmp/ansible:ro
     depends_on:
       mysql:
@@ -46,9 +48,11 @@ services:
     environment:
       DATABASE_URL: mysql+pymysql://${MYSQL_USER:-spmp}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-spmp}
       PACKAGES_DIR: /opt/spmp/packages
+      REPORTS_DIR: /opt/spmp/reports
       ANSIBLE_DIR: /opt/spmp/ansible
     volumes:
       - packages-data:/opt/spmp/packages
+      - reports-data:/opt/spmp/reports
       - ./ansible:/opt/spmp/ansible:ro
     depends_on:
       api:
@@ -65,3 +69,4 @@ services:
 volumes:
   mysql-data:
   packages-data:
+  reports-data:

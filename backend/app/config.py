@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     database_url: str = "mysql+pymysql://spmp:spmp@mysql:3306/spmp"
     secret_key: str = "development-key-must-be-replaced"
     packages_dir: str = "/opt/spmp/packages"
+    reports_dir: str = "/opt/spmp/reports"
     ansible_dir: str = "/opt/spmp/ansible"
     spmp_bootstrap_admin: str = "admin"
     spmp_bootstrap_password: str = "ChangeMeImmediately!"

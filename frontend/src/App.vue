@@ -41,6 +41,9 @@ export default {
       hosts: [],
       packages: [],
       deployments: [],
+      hostQuery: '',
+      packageQuery: '',
+      deploymentQuery: '',
       auditLogs: [],
       hostForm: emptyHost(),
       hostTest: null,
@@ -68,6 +71,7 @@ export default {
       executionPolling: false,
       executionNotifyOnFinish: false,
       completionDialog: false,
+      catalogTimer: null,
     }
   },
   computed: {
@@ -124,9 +128,9 @@ export default {
         this.user = await this.request('get', 'me')
         const [components, hosts, packages, deployments] = await Promise.all([
           this.request('get', 'components'),
-          this.request('get', 'hosts'),
-          this.request('get', 'packages'),
-          this.request('get', 'deployments'),
+          this.request('get', `hosts?q=${encodeURIComponent(this.hostQuery)}`),
+          this.request('get', `packages?q=${encodeURIComponent(this.packageQuery)}`),
+          this.request('get', `deployments?q=${encodeURIComponent(this.deploymentQuery)}`),
         ])
         this.components = components
         this.hosts = hosts
@@ -166,6 +170,10 @@ export default {
     },
     packageTypeLabel(type) {
       return type === 'source' ? '源码包' : '已编译二进制包'
+    },
+    canDeletePackage(pkg) {
+      return this.user?.role === 'super_admin'
+        || (this.user?.role === 'tenant_admin' && !pkg.is_global)
     },
     async testHost() {
       this.error = ''
@@ -224,6 +232,15 @@ export default {
       this.hostForm = emptyHost()
       this.hostTest = null
     },
+    async searchHosts() {
+      this.hosts = await this.request('get', `hosts?q=${encodeURIComponent(this.hostQuery)}`)
+    },
+    async deleteHost(host) {
+      if (!window.confirm(`确认从服务器资产中删除“${host.name}（${host.address}）”吗？历史任务记录不会被删除。`)) return
+      await this.request('delete', `hosts/${host.id}`)
+      this.notice = `服务器资产“${host.name}”已删除。`
+      await this.searchHosts()
+    },
     choosePackageFile(event) {
       this.packageForm.file = event.target.files[0]
     },
@@ -251,6 +268,15 @@ export default {
       } finally {
         this.busy = false
       }
+    },
+    async searchPackages() {
+      this.packages = await this.request('get', `packages?q=${encodeURIComponent(this.packageQuery)}`)
+    },
+    async deletePackage(pkg) {
+      if (!window.confirm(`确认删除软件包“${pkg.filename}”吗？平台将删除该条记录及受控目录中的单个软件包文件。`)) return
+      await this.request('delete', `packages/${pkg.id}`)
+      this.notice = `软件包“${pkg.filename}”已删除。`
+      await this.searchPackages()
     },
     openComponent(component) {
       if (!component.available) return
@@ -439,6 +465,46 @@ export default {
         this.busy = false
       }
     },
+    async searchDeployments() {
+      this.deployments = await this.request('get', `deployments?q=${encodeURIComponent(this.deploymentQuery)}`)
+    },
+    async refreshActiveList() {
+      if (!this.token || document.hidden || this.executionTask) return
+      try {
+        if (this.active === 'hosts') await this.searchHosts()
+        if (this.active === 'packages') await this.searchPackages()
+        if (this.active === 'tasks') await this.searchDeployments()
+      } catch (_) {}
+    },
+    async deleteTask(task) {
+      if (!window.confirm(`确认从任务列表删除“${task.name}”吗？操作审计与已生成报告文件会保留。`)) return
+      await this.request('delete', `deployments/${task.id}`)
+      this.notice = `任务“${task.name}”已从列表删除。`
+      await this.searchDeployments()
+    },
+    async downloadReport(task) {
+      this.error = ''
+      try {
+        const response = await api.get(`deployments/${task.id}/report`, { responseType: 'blob' })
+        const url = window.URL.createObjectURL(response.data)
+        const link = document.createElement('a')
+        link.href = url
+        link.download = `SPMP-Redis-${task.id}.docx`
+        document.body.appendChild(link)
+        link.click()
+        link.remove()
+        window.URL.revokeObjectURL(url)
+        this.notice = `任务“${task.name}”的 Word 交付报告已下载。`
+      } catch (error) {
+        let detail = ''
+        if (error.response?.data instanceof Blob) {
+          try {
+            detail = JSON.parse(await error.response.data.text()).detail || ''
+          } catch (_) {}
+        }
+        this.error = detail || error.response?.data?.detail || error.message || '报告下载失败'
+      }
+    },
     async loadAuditLogs() {
       this.active = 'audit'
       this.auditLogs = await this.request('get', 'audit-logs')
@@ -446,9 +512,11 @@ export default {
   },
   mounted() {
     this.refresh()
+    this.catalogTimer = window.setInterval(() => this.refreshActiveList(), 15000)
   },
   beforeUnmount() {
     this.clearExecutionTimer()
+    if (this.catalogTimer) window.clearInterval(this.catalogTimer)
   },
 }
 </script>
@@ -561,10 +629,17 @@ export default {
           </div>
         </form>
         <div class="panel">
-          <h2>服务器资产</h2>
+          <div class="panel-toolbar">
+            <div><h2>服务器资产</h2><p>仅显示当前有效资产，可按名称、地址、系统或登录用户搜索。</p></div>
+            <form class="search-box" @submit.prevent="searchHosts">
+              <input v-model.trim="hostQuery" placeholder="搜索服务器" aria-label="搜索服务器" />
+              <button type="submit" class="secondary">搜索</button>
+              <button v-if="hostQuery" type="button" class="link" @click="hostQuery = ''; searchHosts()">清空</button>
+            </form>
+          </div>
           <table><thead><tr><th>名称</th><th>连接地址</th><th>系统</th><th>状态</th><th>操作</th></tr></thead>
             <tbody>
-              <tr v-for="host in hosts" :key="host.id"><td><b>{{ host.name }}</b><small>{{ host.ssh_user }}{{ host.use_sudo ? ' + sudo' : '' }}</small></td><td>{{ host.address }}:{{ host.ssh_port }}</td><td>{{ host.os_family }} {{ host.os_version }}<small>{{ host.architecture }}</small></td><td><span class="status succeeded">已验证</span></td><td><button class="link" :disabled="busy || !isOperator" @click="editHost(host)">更新凭据</button></td></tr>
+              <tr v-for="host in hosts" :key="host.id"><td><b>{{ host.name }}</b><small>{{ host.ssh_user }}{{ host.use_sudo ? ' + sudo' : '' }}</small></td><td>{{ host.address }}:{{ host.ssh_port }}</td><td>{{ host.os_family }} {{ host.os_version }}<small>{{ host.architecture }}</small></td><td><span class="status succeeded">已验证</span></td><td class="table-actions"><button class="link" :disabled="busy || !isOperator" @click="editHost(host)">更新凭据</button><button class="link danger-link" :disabled="busy || !isOperator" @click="deleteHost(host)">删除</button></td></tr>
               <tr v-if="!hosts.length"><td colspan="5" class="muted">暂无服务器，请先完成连接测试并保存。</td></tr>
             </tbody>
           </table>
@@ -586,11 +661,18 @@ export default {
           <button :disabled="busy || !canUploadPackage">上传软件包</button>
         </form>
         <div class="panel">
-          <h2>软件包仓库</h2>
-          <table><thead><tr><th>中间件</th><th>版本</th><th>类型</th><th>文件</th></tr></thead>
+          <div class="panel-toolbar">
+            <div><h2>软件包仓库</h2><p>可按中间件、版本、文件名、架构或说明搜索。</p></div>
+            <form class="search-box" @submit.prevent="searchPackages">
+              <input v-model.trim="packageQuery" placeholder="搜索软件包" aria-label="搜索软件包" />
+              <button type="submit" class="secondary">搜索</button>
+              <button v-if="packageQuery" type="button" class="link" @click="packageQuery = ''; searchPackages()">清空</button>
+            </form>
+          </div>
+          <table><thead><tr><th>中间件</th><th>版本</th><th>类型</th><th>文件</th><th>操作</th></tr></thead>
             <tbody>
-              <tr v-for="pkg in packages" :key="pkg.id"><td>{{ componentName(pkg.component) }}</td><td>{{ pkg.version }}<small>{{ pkg.architecture }}</small></td><td>{{ packageTypeLabel(pkg.package_type) }}</td><td>{{ pkg.filename }}<small>{{ pkg.description }}</small></td></tr>
-              <tr v-if="!packages.length"><td colspan="4" class="muted">暂无软件包。</td></tr>
+              <tr v-for="pkg in packages" :key="pkg.id"><td>{{ componentName(pkg.component) }}</td><td>{{ pkg.version }}<small>{{ pkg.architecture }}</small></td><td>{{ packageTypeLabel(pkg.package_type) }}</td><td>{{ pkg.filename }}<small>{{ pkg.description }}</small></td><td><button v-if="canDeletePackage(pkg)" class="link danger-link" :disabled="busy" @click="deletePackage(pkg)">删除</button><small v-else>全局软件包只读</small></td></tr>
+              <tr v-if="!packages.length"><td colspan="5" class="muted">暂无软件包。</td></tr>
             </tbody>
           </table>
         </div>
@@ -671,10 +753,17 @@ export default {
       </section>
 
       <section v-if="active === 'tasks'" class="panel">
-        <h2>部署任务</h2>
+        <div class="panel-toolbar">
+          <div><h2>部署任务</h2><p>可按任务名称、任务 ID、中间件或状态搜索。</p></div>
+          <form class="search-box" @submit.prevent="searchDeployments">
+            <input v-model.trim="deploymentQuery" placeholder="搜索部署任务" aria-label="搜索部署任务" />
+            <button type="submit" class="secondary">搜索</button>
+            <button v-if="deploymentQuery" type="button" class="link" @click="deploymentQuery = ''; searchDeployments()">清空</button>
+          </form>
+        </div>
         <table><thead><tr><th>任务</th><th>中间件/模式</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
           <tbody>
-            <tr v-for="task in deployments" :key="task.id"><td><b>{{ task.name }}</b><small>{{ task.id }}</small></td><td>{{ componentName(task.component) }}<small>{{ task.mode === 'standalone' ? '单机模式' : '集群模式' }}</small></td><td><span class="status" :class="task.status">{{ statusLabel(task.status) }}</span></td><td>{{ new Date(task.created_at).toLocaleString() }}</td><td><button v-if="task.status === 'draft' && isOperator" :disabled="busy" @click="startTask(task)">开始部署</button><button v-else class="link" @click="openExecution(task, !isTerminal(task.status))">{{ isTerminal(task.status) ? '查看记录' : '进入部署' }}</button><button v-if="needsRollback(task) && isOperator" class="link" :disabled="busy" @click="rollbackTask(task)">重新回滚</button><button v-if="canRetryTask(task) && isOperator" class="link" @click="retryTask(task)">创建重试任务</button></td></tr>
+            <tr v-for="task in deployments" :key="task.id"><td><b>{{ task.name }}</b><small>{{ task.id }}</small></td><td>{{ componentName(task.component) }}<small>{{ task.mode === 'standalone' ? '单机模式' : '集群模式' }}</small></td><td><span class="status" :class="task.status">{{ statusLabel(task.status) }}</span></td><td>{{ new Date(task.created_at).toLocaleString() }}</td><td class="table-actions"><button v-if="task.status === 'draft' && isOperator" :disabled="busy" @click="startTask(task)">开始部署</button><button v-else class="link" @click="openExecution(task, !isTerminal(task.status))">{{ isTerminal(task.status) ? '查看记录' : '进入部署' }}</button><button v-if="task.status === 'succeeded' && isOperator" class="link report-link" @click="downloadReport(task)">下载 Word 报告</button><button v-if="needsRollback(task) && isOperator" class="link" :disabled="busy" @click="rollbackTask(task)">重新回滚</button><button v-if="canRetryTask(task) && isOperator" class="link" @click="retryTask(task)">创建重试任务</button><button v-if="isTerminal(task.status) && isOperator" class="link danger-link" :disabled="busy" @click="deleteTask(task)">删除</button></td></tr>
             <tr v-if="!deployments.length"><td colspan="5" class="muted">暂无部署任务。</td></tr>
           </tbody>
         </table>
@@ -722,5 +811,15 @@ export default {
 .completion-card button{display:block;width:100%}
 .completion-icon{width:54px;height:54px;border-radius:50%;display:grid;place-items:center;margin:0 auto 18px;background:#ffeded;color:#c33;font-size:28px;font-weight:800}
 .completion-icon.success{background:#e2f7e9;color:#168046}
-@media(max-width:1000px){.execution-shell{padding:20px}.execution-header{align-items:flex-start;gap:15px}.execution-progress{grid-template-columns:1fr}.execution-log{max-height:none}}
+.panel-toolbar{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}
+.panel-toolbar p{margin:7px 0 0;color:#77849b;font-size:12px}
+.search-box{display:flex;align-items:center;gap:7px;min-width:310px}
+.search-box input{min-width:180px}
+.search-box button{white-space:nowrap}
+.table-actions{min-width:185px}
+.danger-link{color:#c53232;background:#fff0f0}
+.danger-link:hover{color:#fff;background:#c53232}
+.report-link{color:#19693b;background:#e8f6ed}
+.report-link:hover{color:#fff;background:#237b49}
+@media(max-width:1000px){.execution-shell{padding:20px}.execution-header{align-items:flex-start;gap:15px}.execution-progress{grid-template-columns:1fr}.execution-log{max-height:none}.panel-toolbar{flex-direction:column}.search-box{min-width:0;width:100%;flex-wrap:wrap}.search-box input{flex:1}.table-actions{min-width:150px}}
 </style>

@@ -99,6 +99,8 @@ class Package(Base, TimestampMixin):
     architecture: Mapped[str] = mapped_column(String(20), default="x86_64", nullable=False)
     description: Mapped[str] = mapped_column(String(500), default="", nullable=False)
     uploaded_by: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class Deployment(Base, TimestampMixin):
@@ -115,6 +117,10 @@ class Deployment(Base, TimestampMixin):
     requested_by: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
     config: Mapped[dict] = mapped_column(JSON, nullable=False)
     rollback_result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    report_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    report_generated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    report_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class TaskLog(Base):
