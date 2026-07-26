@@ -1,0 +1,304 @@
+---
+- name: Derive task-owned identities
+  ansible.builtin.set_fact:
+    redis_service_name: "spmp-redis-{{ spmp_task_id[:8] }}-{{ redis_instance_id }}"
+    redis_service_user: "spmpr{{ (spmp_task_id | regex_replace('-', ''))[:8] }}{{ redis_instance_id | regex_replace('[^0-9]', '') }}"
+    redis_marker_path: "{{ redis_config_path }}/.spmp-managed-{{ spmp_task_id }}-{{ redis_instance_id }}"
+
+- name: Create task-owned configuration directory
+  ansible.builtin.file:
+    path: "{{ redis_config_path }}"
+    state: directory
+    mode: '0700'
+
+- name: Write ownership marker before further mutations
+  ansible.builtin.copy:
+    content: "SPMP task {{ spmp_task_id }} owns {{ redis_instance_id }} and only its exact paths."
+    dest: "{{ redis_marker_path }}"
+    mode: '0400'
+
+- name: Create a dedicated service user for this instance
+  ansible.builtin.user:
+    name: "{{ redis_service_user }}"
+    system: true
+    create_home: false
+    shell: /usr/sbin/nologin
+
+- name: Create exact task-owned directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ redis_service_user }}"
+    group: "{{ redis_service_user }}"
+    mode: '0750'
+  loop:
+    - "{{ redis_install_path }}"
+    - "{{ redis_install_path }}/bin"
+    - "{{ redis_data_path }}"
+    - "{{ redis_log_path }}"
+    - "{{ redis_config_path }}"
+
+- name: Find restricted parent directories that require traversal ACLs
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - >-
+        import json, os, stat, sys;
+        from pathlib import Path;
+        parents = set();
+        [parents.update(str(parent) for parent in Path(raw).parents if str(parent) != '/')
+        for raw in sys.argv[1:]];
+        print(json.dumps(sorted(path for path in parents
+        if os.path.isdir(path) and not (os.stat(path).st_mode & stat.S_IXOTH))))
+      - "{{ redis_install_path }}"
+      - "{{ redis_data_path }}"
+      - "{{ redis_log_path }}"
+      - "{{ redis_config_path }}"
+  changed_when: false
+  register: redis_restricted_parent_paths
+
+- name: Grant only this Redis service user traversal on restricted parents
+  ansible.builtin.command:
+    argv:
+      - setfacl
+      - -m
+      - "u:{{ redis_service_user }}:--x"
+      - "{{ item }}"
+  loop: "{{ redis_restricted_parent_paths.stdout | from_json }}"
+
+- name: Copy uploaded package to the task-owned directory
+  ansible.builtin.copy:
+    src: "{{ redis_package_path }}"
+    dest: "{{ redis_install_path }}/redis-package.tar.gz"
+    owner: "{{ redis_service_user }}"
+    group: "{{ redis_service_user }}"
+    mode: '0640'
+
+- name: Create package extraction directory
+  ansible.builtin.file:
+    path: "{{ redis_install_path }}/package"
+    state: directory
+    owner: "{{ redis_service_user }}"
+    group: "{{ redis_service_user }}"
+    mode: '0750'
+
+- name: Extract uploaded Redis package
+  ansible.builtin.unarchive:
+    src: "{{ redis_install_path }}/redis-package.tar.gz"
+    dest: "{{ redis_install_path }}/package"
+    remote_src: true
+    owner: "{{ redis_service_user }}"
+    group: "{{ redis_service_user }}"
+
+- name: Find source tree in source package
+  ansible.builtin.find:
+    paths: "{{ redis_install_path }}/package"
+    file_type: directory
+    patterns: "redis-*"
+    recurse: false
+  register: redis_source_dirs
+  when: redis_package_type == 'source'
+
+- name: Require one Redis source root
+  ansible.builtin.assert:
+    that: redis_source_dirs.matched == 1
+    fail_msg: "源码包必须包含一个 redis-* 根目录"
+  when: redis_package_type == 'source'
+
+- name: Start Redis source build (progress is checked every 10 seconds)
+  ansible.builtin.command:
+    argv:
+      - runuser
+      - -u
+      - "{{ redis_service_user }}"
+      - --
+      - make
+      - -j2
+      - BUILD_TLS=no
+  args:
+    chdir: "{{ redis_source_dirs.files[0].path }}"
+  environment:
+    HOME: "{{ redis_install_path }}"
+  vars:
+    ansible_async_dir: "{{ redis_install_path }}/.ansible_async"
+  async: 1800
+  poll: 0
+  register: redis_build_job
+  when: redis_package_type == 'source'
+
+- name: Wait for Redis source build (30 minute limit)
+  ansible.builtin.async_status:
+    jid: "{{ redis_build_job.ansible_job_id }}"
+  vars:
+    ansible_async_dir: "{{ redis_install_path }}/.ansible_async"
+  register: redis_build_result
+  until: redis_build_result.finished
+  retries: 180
+  delay: 10
+  when: redis_package_type == 'source'
+
+- name: Install Redis binaries built from source
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ redis_install_path }}/bin/{{ item | basename }}"
+    remote_src: true
+    owner: "{{ redis_service_user }}"
+    group: "{{ redis_service_user }}"
+    mode: '0750'
+  loop:
+    - "{{ redis_source_dirs.files[0].path }}/src/redis-server"
+    - "{{ redis_source_dirs.files[0].path }}/src/redis-cli"
+  when: redis_package_type == 'source'
+
+- name: Locate redis-server in binary package
+  ansible.builtin.find:
+    paths: "{{ redis_install_path }}/package"
+    file_type: file
+    patterns: "redis-server"
+    recurse: true
+  register: binary_server
+  when: redis_package_type == 'binary'
+
+- name: Locate redis-cli in binary package
+  ansible.builtin.find:
+    paths: "{{ redis_install_path }}/package"
+    file_type: file
+    patterns: "redis-cli"
+    recurse: true
+  register: binary_cli
+  when: redis_package_type == 'binary'
+
+- name: Require redis-server and redis-cli in binary package
+  ansible.builtin.assert:
+    that:
+      - binary_server.matched >= 1
+      - binary_cli.matched >= 1
+    fail_msg: "二进制包中必须包含 redis-server 和 redis-cli"
+  when: redis_package_type == 'binary'
+
+- name: Install uploaded Redis binaries
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: "{{ redis_install_path }}/bin/{{ item.name }}"
+    remote_src: true
+    owner: "{{ redis_service_user }}"
+    group: "{{ redis_service_user }}"
+    mode: '0750'
+  loop:
+    - {source: "{{ binary_server.files[0].path }}", name: "redis-server"}
+    - {source: "{{ binary_cli.files[0].path }}", name: "redis-cli"}
+  when: redis_package_type == 'binary'
+
+- name: Write platform Redis configuration
+  ansible.builtin.template:
+    src: redis.conf.j2
+    dest: "{{ redis_config_path }}/redis.conf"
+    owner: "{{ redis_service_user }}"
+    group: "{{ redis_service_user }}"
+    mode: '0640'
+  no_log: true
+  when: custom_redis_conf | default('') | length == 0
+
+- name: Write user-provided Redis configuration with highest priority
+  ansible.builtin.copy:
+    content: "{{ custom_redis_conf }}"
+    dest: "{{ redis_config_path }}/redis.conf"
+    owner: "{{ redis_service_user }}"
+    group: "{{ redis_service_user }}"
+    mode: '0640'
+  no_log: true
+  when: custom_redis_conf | default('') | length > 0
+
+- name: Install task-owned systemd unit
+  ansible.builtin.template:
+    src: redis.service.j2
+    dest: "/etc/systemd/system/{{ redis_service_name }}.service"
+    mode: '0600'
+  no_log: true
+
+- name: Start and verify Redis service with diagnostics
+  block:
+    - name: Enable and start the task-owned Redis service
+      ansible.builtin.systemd_service:
+        name: "{{ redis_service_name }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Wait for Redis on the target loopback interface
+      ansible.builtin.wait_for:
+        host: "127.0.0.1"
+        port: "{{ redis_port }}"
+        timeout: 45
+
+    - name: Verify Redis responds to an authenticated PING
+      ansible.builtin.command:
+        argv:
+          - "{{ redis_install_path }}/bin/redis-cli"
+          - -h
+          - "127.0.0.1"
+          - -p
+          - "{{ redis_port | string }}"
+          - ping
+      environment:
+        REDISCLI_AUTH: "{{ redis_password }}"
+      changed_when: false
+      no_log: true
+  rescue:
+    - name: Collect Redis systemd status after a verification failure
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - status
+          - "{{ redis_service_name }}"
+          - --no-pager
+          - --full
+      changed_when: false
+      failed_when: false
+      register: redis_systemd_status
+
+    - name: Collect recent Redis journal after a start failure
+      ansible.builtin.command:
+        argv:
+          - journalctl
+          - -u
+          - "{{ redis_service_name }}"
+          - -n
+          - "80"
+          - --no-pager
+      changed_when: false
+      failed_when: false
+      register: redis_journal
+
+    - name: Collect listening TCP ports after a verification failure
+      ansible.builtin.command:
+        argv:
+          - ss
+          - -ltnp
+      changed_when: false
+      failed_when: false
+      register: redis_listening_ports
+
+    - name: Collect Redis application log after a verification failure
+      ansible.builtin.command:
+        argv:
+          - tail
+          - -n
+          - "80"
+          - "{{ redis_log_path }}/redis.log"
+      changed_when: false
+      failed_when: false
+      register: redis_application_log
+
+    - name: Show Redis service verification diagnostics
+      ansible.builtin.debug:
+        msg:
+          - "{{ redis_systemd_status.stdout_lines | default([]) }}"
+          - "{{ redis_journal.stdout_lines | default([]) }}"
+          - "{{ redis_listening_ports.stdout_lines | default([]) }}"
+          - "{{ redis_application_log.stdout_lines | default([]) }}"
+
+    - name: Stop deployment after recording Redis verification diagnostics
+      ansible.builtin.fail:
+        msg: "Redis 启动或健康检查失败，systemd、监听端口和 Redis 日志已写入部署日志"

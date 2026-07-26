@@ -1,0 +1,60 @@
+---
+- name: Install and start every Redis instance
+  hosts: redis
+  gather_facts: false
+  any_errors_fatal: true
+  serial: 1
+  roles:
+    - redis
+
+- name: Create Redis Cluster after every instance is ready
+  hosts: redis
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Verify every Redis client port is reachable from every instance
+      ansible.builtin.wait_for:
+        host: "{{ item.address }}"
+        port: "{{ item.port }}"
+        timeout: 20
+      loop: "{{ redis_nodes }}"
+      when: redis_deployment_mode == 'cluster'
+
+    - name: Verify every Redis Cluster Bus port is reachable from every instance
+      ansible.builtin.wait_for:
+        host: "{{ item.address }}"
+        port: "{{ item.bus_port }}"
+        timeout: 20
+      loop: "{{ redis_nodes }}"
+      when: redis_deployment_mode == 'cluster'
+
+    - name: Create Redis Cluster from the first configured instance
+      ansible.builtin.command: >-
+        {{ redis_install_path }}/bin/redis-cli --cluster create
+        {% for node in redis_nodes %}{{ node.address }}:{{ node.port }} {% endfor %}
+        --cluster-replicas {{ redis_replicas_per_primary }}
+        --cluster-yes
+      environment:
+        REDISCLI_AUTH: "{{ redis_password }}"
+      run_once: true
+      when: redis_deployment_mode == 'cluster'
+
+    - name: Verify Redis Cluster reaches the healthy state
+      ansible.builtin.command:
+        argv:
+          - "{{ redis_install_path }}/bin/redis-cli"
+          - -h
+          - "127.0.0.1"
+          - -p
+          - "{{ redis_port | string }}"
+          - cluster
+          - info
+      environment:
+        REDISCLI_AUTH: "{{ redis_password }}"
+      changed_when: false
+      register: redis_cluster_info
+      retries: 12
+      delay: 5
+      until: "'cluster_state:ok' in redis_cluster_info.stdout"
+      run_once: true
+      when: redis_deployment_mode == 'cluster'

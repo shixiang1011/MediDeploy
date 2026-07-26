@@ -1,0 +1,3 @@
+appendonly: true
+maxmemory_policy: noeviction
+custom_redis_conf: ""

@@ -1,0 +1,72 @@
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-spmp}
+      MYSQL_USER: ${MYSQL_USER:-spmp}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+    command: ["mysqld", "--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build: ./backend
+    image: spmp-api:local
+    restart: unless-stopped
+    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    env_file: .env
+    environment:
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER:-spmp}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-spmp}
+      PACKAGES_DIR: /opt/spmp/packages
+      REPORTS_DIR: /opt/spmp/reports
+      ANSIBLE_DIR: /opt/spmp/ansible
+    volumes:
+      - packages-data:/opt/spmp/packages
+      - reports-data:/opt/spmp/reports
+      - ./ansible:/opt/spmp/ansible:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  worker:
+    image: spmp-api:local
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker"]
+    env_file: .env
+    environment:
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER:-spmp}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-spmp}
+      PACKAGES_DIR: /opt/spmp/packages
+      REPORTS_DIR: /opt/spmp/reports
+      ANSIBLE_DIR: /opt/spmp/ansible
+    volumes:
+      - packages-data:/opt/spmp/packages
+      - reports-data:/opt/spmp/reports
+      - ./ansible:/opt/spmp/ansible:ro
+    depends_on:
+      api:
+        condition: service_healthy
+
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "${SPMP_PORT:-8080}:80"
+    depends_on:
+      - api
+
+volumes:
+  mysql-data:
+  packages-data:
+  reports-data:

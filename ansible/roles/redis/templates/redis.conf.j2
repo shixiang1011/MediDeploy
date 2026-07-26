@@ -1,0 +1,39 @@
+# Managed by SP MediDeploy Platform. Task: {{ spmp_task_id }}
+bind 0.0.0.0
+protected-mode yes
+port {{ redis_port }}
+tcp-backlog 511
+timeout 0
+tcp-keepalive 300
+daemonize no
+supervised no
+pidfile {{ redis_data_path }}/redis.pid
+loglevel notice
+logfile {{ redis_log_path }}/redis.log
+databases 16
+always-show-logo no
+save 3600 1
+save 300 100
+save 60 10000
+stop-writes-on-bgsave-error yes
+rdbcompression yes
+rdbchecksum yes
+dbfilename dump.rdb
+dir {{ redis_data_path }}
+masterauth {{ redis_password }}
+requirepass {{ redis_password }}
+appendonly {{ 'yes' if appendonly else 'no' }}
+appendfilename "appendonly.aof"
+appendfsync everysec
+cluster-enabled {{ 'yes' if redis_deployment_mode == 'cluster' else 'no' }}
+{% if redis_deployment_mode == 'cluster' %}
+cluster-config-file nodes.conf
+cluster-node-timeout 5000
+cluster-announce-ip {{ redis_advertise_address }}
+cluster-announce-port {{ redis_port }}
+cluster-announce-bus-port {{ redis_port | int + 10000 }}
+{% endif %}
+{% if maxmemory %}
+maxmemory {{ maxmemory }}
+{% endif %}
+maxmemory-policy {{ maxmemory_policy }}
