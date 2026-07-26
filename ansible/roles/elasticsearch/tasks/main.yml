@@ -1,0 +1,312 @@
+---
+- name: Derive task-owned identities
+  ansible.builtin.set_fact:
+    es_service_name: "spmp-es-{{ spmp_task_id[:8] }}-{{ es_instance_id }}"
+    es_service_user: "spmpe{{ (spmp_task_id | regex_replace('-', ''))[:8] }}{{ es_instance_id | regex_replace('[^0-9]', '') }}"
+    es_marker_path: "{{ es_config_path }}/.spmp-managed-{{ spmp_task_id }}-{{ es_instance_id }}"
+    es_sysctl_file: "/etc/sysctl.d/99-spmp-es-{{ spmp_task_id[:8] }}-{{ es_instance_id }}.conf"
+
+- name: Create task-owned configuration directory
+  ansible.builtin.file:
+    path: "{{ es_config_path }}"
+    state: directory
+    mode: '0700'
+
+- name: Write ownership marker before further mutations
+  ansible.builtin.copy:
+    content: "SPMP task {{ spmp_task_id }} owns {{ es_instance_id }} and only its exact paths."
+    dest: "{{ es_marker_path }}"
+    mode: '0400'
+
+- name: Create a dedicated service user for this node
+  ansible.builtin.user:
+    name: "{{ es_service_user }}"
+    system: true
+    create_home: false
+    shell: /usr/sbin/nologin
+
+- name: Create exact task-owned directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ es_service_user }}"
+    group: "{{ es_service_user }}"
+    mode: '0750'
+  loop:
+    - "{{ es_install_path }}"
+    - "{{ es_data_path }}"
+    - "{{ es_log_path }}"
+    - "{{ es_config_path }}"
+
+- name: Find restricted parent directories that require traversal ACLs
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - >-
+        import json, os, stat, sys;
+        from pathlib import Path;
+        parents = set();
+        [parents.update(str(parent) for parent in Path(raw).parents if str(parent) != '/')
+        for raw in sys.argv[1:]];
+        print(json.dumps(sorted(path for path in parents
+        if os.path.isdir(path) and not (os.stat(path).st_mode & stat.S_IXOTH))))
+      - "{{ es_install_path }}"
+      - "{{ es_data_path }}"
+      - "{{ es_log_path }}"
+      - "{{ es_config_path }}"
+  changed_when: false
+  register: es_restricted_parent_paths
+
+- name: Grant only this Elasticsearch service user traversal on restricted parents
+  ansible.builtin.command:
+    argv:
+      - setfacl
+      - -m
+      - "u:{{ es_service_user }}:--x"
+      - "{{ item }}"
+  loop: "{{ es_restricted_parent_paths.stdout | from_json }}"
+
+- name: Copy uploaded package to the task-owned directory
+  ansible.builtin.copy:
+    src: "{{ es_package_path }}"
+    dest: "{{ es_install_path }}/elasticsearch-package.tar.gz"
+    owner: "{{ es_service_user }}"
+    group: "{{ es_service_user }}"
+    mode: '0640'
+
+- name: Create package extraction directory
+  ansible.builtin.file:
+    path: "{{ es_install_path }}/package"
+    state: directory
+    owner: "{{ es_service_user }}"
+    group: "{{ es_service_user }}"
+    mode: '0750'
+
+- name: Extract uploaded Elasticsearch package
+  ansible.builtin.unarchive:
+    src: "{{ es_install_path }}/elasticsearch-package.tar.gz"
+    dest: "{{ es_install_path }}/package"
+    remote_src: true
+    owner: "{{ es_service_user }}"
+    group: "{{ es_service_user }}"
+
+- name: Find Elasticsearch home in binary package
+  ansible.builtin.find:
+    paths: "{{ es_install_path }}/package"
+    file_type: directory
+    patterns: "elasticsearch-*"
+    recurse: false
+  register: es_home_dirs
+
+- name: Require one Elasticsearch package root
+  ansible.builtin.assert:
+    that: es_home_dirs.matched == 1
+    fail_msg: "Elasticsearch 二进制包必须包含一个 elasticsearch-* 根目录"
+
+- name: Remember Elasticsearch home
+  ansible.builtin.set_fact:
+    es_home_path: "{{ es_home_dirs.files[0].path }}"
+
+- name: Copy default Elasticsearch config files
+  ansible.builtin.copy:
+    src: "{{ es_home_path }}/config/"
+    dest: "{{ es_config_path }}/"
+    remote_src: true
+    owner: "{{ es_service_user }}"
+    group: "{{ es_service_user }}"
+    mode: preserve
+
+- name: Capture previous vm.max_map_count value
+  ansible.builtin.command:
+    argv:
+      - sysctl
+      - -n
+      - vm.max_map_count
+  changed_when: false
+  register: previous_vm_max_map_count
+
+- name: Store previous vm.max_map_count value for rollback
+  ansible.builtin.copy:
+    content: "{{ previous_vm_max_map_count.stdout | trim }}"
+    dest: "{{ es_config_path }}/.spmp-vm-max-map-count-before"
+    owner: "{{ es_service_user }}"
+    group: "{{ es_service_user }}"
+    mode: '0400'
+
+- name: Persist task-owned vm.max_map_count configuration
+  ansible.builtin.copy:
+    content: "vm.max_map_count=655350\n"
+    dest: "{{ es_sysctl_file }}"
+    mode: '0644'
+
+- name: Apply vm.max_map_count for Elasticsearch
+  ansible.builtin.command:
+    argv:
+      - sysctl
+      - -w
+      - vm.max_map_count=655350
+  changed_when: false
+
+- name: Generate a shared transport CA on the first node
+  ansible.builtin.command:
+    argv:
+      - "{{ es_home_path }}/bin/elasticsearch-certutil"
+      - ca
+      - --silent
+      - --pass
+      - ""
+      - --out
+      - "{{ es_config_path }}/elastic-stack-ca.p12"
+  run_once: true
+  no_log: true
+
+- name: Generate a shared transport certificate on the first node
+  ansible.builtin.command:
+    argv:
+      - "{{ es_home_path }}/bin/elasticsearch-certutil"
+      - cert
+      - --silent
+      - --ca
+      - "{{ es_config_path }}/elastic-stack-ca.p12"
+      - --ca-pass
+      - ""
+      - --pass
+      - ""
+      - --out
+      - "{{ es_config_path }}/elastic-certificates.p12"
+  run_once: true
+  no_log: true
+
+- name: Read shared transport certificate from the first node
+  ansible.builtin.slurp:
+    src: "{{ es_config_path }}/elastic-certificates.p12"
+  register: es_transport_certificate
+  run_once: true
+  no_log: true
+
+- name: Install shared transport certificate on every node
+  ansible.builtin.copy:
+    content: "{{ es_transport_certificate.content | b64decode }}"
+    dest: "{{ es_config_path }}/elastic-certificates.p12"
+    owner: "{{ es_service_user }}"
+    group: "{{ es_service_user }}"
+    mode: '0640'
+  no_log: true
+
+- name: Write platform Elasticsearch configuration
+  ansible.builtin.template:
+    src: elasticsearch.yml.j2
+    dest: "{{ es_config_path }}/elasticsearch.yml"
+    owner: "{{ es_service_user }}"
+    group: "{{ es_service_user }}"
+    mode: '0640'
+
+- name: Create JVM options overlay directory
+  ansible.builtin.file:
+    path: "{{ es_config_path }}/jvm.options.d"
+    state: directory
+    owner: "{{ es_service_user }}"
+    group: "{{ es_service_user }}"
+    mode: '0750'
+
+- name: Write JVM heap settings when configured
+  ansible.builtin.copy:
+    content: "-Xms{{ es_heap_size }}\n-Xmx{{ es_heap_size }}\n"
+    dest: "{{ es_config_path }}/jvm.options.d/spmp-heap.options"
+    owner: "{{ es_service_user }}"
+    group: "{{ es_service_user }}"
+    mode: '0640'
+  when: es_heap_size | default('') | length > 0
+
+- name: Create Elasticsearch keystore
+  ansible.builtin.command:
+    argv:
+      - "{{ es_home_path }}/bin/elasticsearch-keystore"
+      - create
+  environment:
+    ES_PATH_CONF: "{{ es_config_path }}"
+  args:
+    creates: "{{ es_config_path }}/elasticsearch.keystore"
+  become_user: "{{ es_service_user }}"
+  no_log: true
+  when: es_security_enabled | bool
+
+- name: Add bootstrap password to Elasticsearch keystore
+  ansible.builtin.shell: >-
+    printf '%s\n' "$ES_BOOTSTRAP_PASSWORD" |
+    "{{ es_home_path }}/bin/elasticsearch-keystore" add -x -f bootstrap.password
+  environment:
+    ES_PATH_CONF: "{{ es_config_path }}"
+    ES_BOOTSTRAP_PASSWORD: "{{ es_elastic_password }}"
+  become_user: "{{ es_service_user }}"
+  no_log: true
+  when: es_security_enabled | bool
+
+- name: Install task-owned systemd unit
+  ansible.builtin.template:
+    src: elasticsearch.service.j2
+    dest: "/etc/systemd/system/{{ es_service_name }}.service"
+    mode: '0600'
+
+- name: Start and verify Elasticsearch service with diagnostics
+  block:
+    - name: Enable and start the task-owned Elasticsearch service
+      ansible.builtin.systemd_service:
+        name: "{{ es_service_name }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Wait for Elasticsearch HTTP port on the target loopback interface
+      ansible.builtin.wait_for:
+        host: "127.0.0.1"
+        port: "{{ es_http_port }}"
+        timeout: 90
+  rescue:
+    - name: Collect Elasticsearch systemd status after a verification failure
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - status
+          - "{{ es_service_name }}"
+          - --no-pager
+          - --full
+      changed_when: false
+      failed_when: false
+      register: es_systemd_status
+
+    - name: Collect recent Elasticsearch journal after a start failure
+      ansible.builtin.command:
+        argv:
+          - journalctl
+          - -u
+          - "{{ es_service_name }}"
+          - -n
+          - "100"
+          - --no-pager
+      changed_when: false
+      failed_when: false
+      register: es_journal
+
+    - name: Collect Elasticsearch application log after a verification failure
+      ansible.builtin.command:
+        argv:
+          - tail
+          - -n
+          - "100"
+          - "{{ es_log_path }}/{{ es_cluster_name }}.log"
+      changed_when: false
+      failed_when: false
+      register: es_application_log
+
+    - name: Show Elasticsearch verification diagnostics
+      ansible.builtin.debug:
+        msg:
+          - "{{ es_systemd_status.stdout_lines | default([]) }}"
+          - "{{ es_journal.stdout_lines | default([]) }}"
+          - "{{ es_application_log.stdout_lines | default([]) }}"
+
+    - name: Stop deployment after recording Elasticsearch verification diagnostics
+      ansible.builtin.fail:
+        msg: "Elasticsearch 启动或健康检查失败，systemd 和 Elasticsearch 日志已写入部署日志"

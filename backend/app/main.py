@@ -57,7 +57,7 @@ COMPONENTS = [
     {"id": "minio", "name": "MinIO", "available": False, "modes": ["standalone", "cluster"]},
     {"id": "rabbitmq", "name": "RabbitMQ", "available": False, "modes": ["standalone", "cluster"]},
     {"id": "kafka", "name": "Kafka", "available": False, "modes": ["standalone", "cluster"]},
-    {"id": "elasticsearch", "name": "Elasticsearch", "available": False, "modes": ["standalone", "cluster"]},
+    {"id": "elasticsearch", "name": "Elasticsearch", "available": True, "modes": ["standalone", "cluster"]},
     {"id": "nginx", "name": "Nginx", "available": False, "modes": ["standalone", "cluster"]},
     {"id": "nexus", "name": "Nexus", "available": False, "modes": ["standalone"]},
 ]
@@ -591,7 +591,51 @@ def make_report_snapshot(
     config: dict,
     hosts_by_id: dict[str, Host],
 ) -> dict:
+    if deployment.component == "elasticsearch":
+        return {
+            "component": deployment.component,
+            "task_id": deployment.id,
+            "task_name": deployment.name,
+            "mode": deployment.mode.value,
+            "created_at": (deployment.created_at or datetime.utcnow()).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            ),
+            "completed_at": "",
+            "package": {
+                "version": package.version,
+                "package_type": package.package_type.value,
+                "filename": package.filename,
+                "architecture": package.architecture,
+            },
+            "config": {
+                "cluster_name": config["cluster_name"],
+                "security_enabled": config["security_enabled"],
+                "http_cors_enabled": config["http_cors_enabled"],
+                "heap_size": config.get("heap_size"),
+                "disk_watermark_low": config["disk_watermark_low"],
+                "disk_watermark_high": config["disk_watermark_high"],
+                "disk_watermark_flood_stage": config["disk_watermark_flood_stage"],
+            },
+            "instances": [
+                {
+                    "host_id": instance["host_id"],
+                    "host_name": hosts_by_id[instance["host_id"]].name,
+                    "address": hosts_by_id[instance["host_id"]].address,
+                    "ssh_port": hosts_by_id[instance["host_id"]].ssh_port,
+                    "node_name": instance.get("node_name") or f"node-{index}",
+                    "http_port": instance["http_port"],
+                    "transport_port": instance["transport_port"],
+                    "service_name": f"spmp-es-{deployment.id[:8]}-es_{index:03d}",
+                    "install_dir": instance["install_dir"],
+                    "data_dir": instance["data_dir"],
+                    "log_dir": instance["log_dir"],
+                    "config_dir": instance["config_dir"],
+                }
+                for index, instance in enumerate(config["instances"], 1)
+            ],
+        }
     return {
+        "component": deployment.component,
         "task_id": deployment.id,
         "task_name": deployment.name,
         "mode": deployment.mode.value,
@@ -660,7 +704,12 @@ def create_deployment(
     ):
         raise HTTPException(status_code=400, detail="拓扑中包含无效、未验证或跨租户服务器")
     config = body.config.model_dump(mode="json")
-    config["redis_password"] = encrypt(config["redis_password"])
+    if body.component == "redis":
+        config["redis_password"] = encrypt(config["redis_password"])
+    elif body.component == "elasticsearch":
+        if package.package_type != PackageType.BINARY:
+            raise HTTPException(status_code=400, detail="Elasticsearch 当前仅支持官方二进制 tar.gz/tgz 包")
+        config["elastic_password"] = encrypt(config["elastic_password"])
     deployment = Deployment(
         tenant_id=user.tenant_id,
         name=body.name,
@@ -898,14 +947,19 @@ def download_deployment_report(
             hosts_by_id,
         )
         deployment.report_snapshot = snapshot
-    report_path = report_path_for(deployment.id)
+    report_path = report_path_for(deployment.id, deployment.component)
     if not report_path.is_file():
         snapshot["completed_at"] = (
             deployment.updated_at.strftime("%Y-%m-%d %H:%M:%S")
         )
         build_report(
             snapshot,
-            redis_password=decrypt(deployment.config["redis_password"]),
+            redis_password=decrypt(deployment.config["redis_password"])
+            if deployment.component == "redis"
+            else None,
+            elastic_password=decrypt(deployment.config["elastic_password"])
+            if deployment.component == "elasticsearch"
+            else None,
             output_path=report_path,
         )
         deployment.report_path = str(report_path)
@@ -924,7 +978,7 @@ def download_deployment_report(
         media_type=(
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         ),
-        filename=f"SPMP-Redis-{deployment.id}.docx",
+        filename=f"SPMP-{deployment.component}-{deployment.id}.docx",
     )
 
 
@@ -942,6 +996,7 @@ def owned_deployment(db: Session, deployment_id: str, user: User) -> Deployment:
 def deployment_view(item: Deployment) -> dict:
     safe_config = dict(item.config)
     safe_config.pop("redis_password", None)
+    safe_config.pop("elastic_password", None)
     instances = []
     for instance in safe_config.get("instances", []):
         visible = dict(instance)

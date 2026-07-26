@@ -227,10 +227,19 @@ def _configure_document(document: Document, task_id: str) -> None:
 def build_report(
     snapshot: dict,
     *,
-    redis_password: str,
+    redis_password: str | None = None,
+    elastic_password: str | None = None,
     output_path: Path,
     generated_at: datetime | None = None,
 ) -> Path:
+    if snapshot.get("component") == "elasticsearch":
+        return _build_elasticsearch_report(
+            snapshot,
+            elastic_password=elastic_password or "",
+            output_path=output_path,
+            generated_at=generated_at,
+        )
+
     generated_at = generated_at or datetime.now()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     document = Document()
@@ -298,7 +307,7 @@ def build_report(
         document,
         [
             ("Redis 用户", "default"),
-            ("Redis 密码", redis_password),
+            ("Redis 密码", redis_password or ""),
             ("连接示例", f"redis-cli -h {snapshot['instances'][0]['address']} -p {snapshot['instances'][0]['redis_port']} -a <报告中的密码>"),
         ],
     )
@@ -373,5 +382,152 @@ def build_report(
     return output_path
 
 
-def report_path_for(deployment_id: str) -> Path:
-    return Path(settings().reports_dir) / f"redis-deployment-{deployment_id}.docx"
+def _build_elasticsearch_report(
+    snapshot: dict,
+    *,
+    elastic_password: str,
+    output_path: Path,
+    generated_at: datetime | None = None,
+) -> Path:
+    generated_at = generated_at or datetime.now()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    document = Document()
+    _configure_document(document, snapshot["task_id"])
+    document.core_properties.title = (
+        f"{snapshot['task_name']} - Elasticsearch 部署交付报告"
+    )
+    document.core_properties.subject = "SP MediDeploy deployment delivery report"
+    document.core_properties.author = "SP MediDeploy Platform"
+    document.core_properties.keywords = "SPMP, Elasticsearch, deployment, delivery"
+
+    kicker = document.add_paragraph()
+    kicker.paragraph_format.space_after = Pt(3)
+    _set_run_font(kicker.add_run("SP MEDIDEPLOY · DELIVERY REPORT"), size=9, color=BLUE, bold=True)
+    title = document.add_paragraph()
+    title.paragraph_format.space_after = Pt(4)
+    _set_run_font(title.add_run("Elasticsearch 部署交付报告"), size=23, color=INK, bold=True)
+    subtitle = document.add_paragraph()
+    subtitle.paragraph_format.space_after = Pt(16)
+    _set_run_font(subtitle.add_run(snapshot["task_name"]), size=13, color=MUTED, bold=True)
+
+    _add_key_value_table(
+        document,
+        [
+            ("任务 ID", snapshot["task_id"]),
+            ("部署模式", "Elasticsearch 集群" if snapshot["mode"] == "cluster" else "单机实例"),
+            ("集群名称", snapshot["config"]["cluster_name"]),
+            ("软件版本", snapshot["package"]["version"]),
+            ("软件包", f"{snapshot['package']['package_type']} · {snapshot['package']['filename']}"),
+            ("部署完成时间", snapshot["completed_at"]),
+            ("报告生成时间", generated_at.strftime("%Y-%m-%d %H:%M:%S")),
+        ],
+    )
+
+    warning = document.add_table(rows=1, cols=1)
+    _set_cell_fill(warning.cell(0, 0), CAUTION)
+    _format_cell(
+        warning.cell(0, 0),
+        "敏感信息提示：本报告包含 Elasticsearch elastic 账号明文密码。请仅在授权范围内存储、传输和使用。",
+        bold=True,
+        color=CAUTION_TEXT,
+        size=10,
+    )
+    _set_table_geometry(warning, [CONTENT_WIDTH_DXA])
+    _set_table_borders(warning, color="E5C365", size=6)
+
+    config = snapshot["config"]
+    _add_heading(document, "1. 部署概览")
+    _add_key_value_table(
+        document,
+        [
+            ("节点数量", str(len(snapshot["instances"]))),
+            ("安全认证", "已开启" if config["security_enabled"] else "未开启"),
+            ("HTTP CORS", "已开启" if config["http_cors_enabled"] else "未开启"),
+            ("JVM Heap", config.get("heap_size") or "使用 Elasticsearch 默认值"),
+            ("磁盘水位", f"{config['disk_watermark_low']} / {config['disk_watermark_high']} / {config['disk_watermark_flood_stage']}"),
+        ],
+    )
+
+    first = snapshot["instances"][0]
+    _add_heading(document, "2. 访问凭据")
+    _add_key_value_table(
+        document,
+        [
+            ("Elasticsearch 用户", "elastic"),
+            ("Elasticsearch 密码", elastic_password),
+            ("连接示例", f"curl -u elastic:<报告中的密码> http://{first['address']}:{first['http_port']}/"),
+        ],
+    )
+
+    _add_heading(document, "3. 节点与端口")
+    topology = document.add_table(rows=1, cols=6)
+    headers = ["序号", "节点", "服务器", "HTTP", "Transport", "systemd 服务"]
+    for cell, value in zip(topology.rows[0].cells, headers):
+        _set_cell_fill(cell, LIGHT)
+        _format_cell(cell, value, bold=True, color=INK, size=8.5, align=WD_ALIGN_PARAGRAPH.CENTER)
+    for index, instance in enumerate(snapshot["instances"], 1):
+        cells = topology.add_row().cells
+        values = [
+            str(index),
+            instance["node_name"],
+            f"{instance['host_name']}\n{instance['address']}:{instance['ssh_port']}",
+            str(instance["http_port"]),
+            str(instance["transport_port"]),
+            instance["service_name"],
+        ]
+        for column, (cell, value) in enumerate(zip(cells, values)):
+            _format_cell(
+                cell,
+                value,
+                size=8.0,
+                align=WD_ALIGN_PARAGRAPH.CENTER if column in (0, 3, 4) else WD_ALIGN_PARAGRAPH.LEFT,
+            )
+    _set_table_geometry(topology, [600, 1400, 2500, 850, 1000, 3010])
+    _set_table_borders(topology)
+
+    _add_heading(document, "4. 部署目录")
+    directories = document.add_table(rows=1, cols=5)
+    for cell, value in zip(directories.rows[0].cells, ["节点", "安装目录", "数据目录", "日志目录", "配置目录"]):
+        _set_cell_fill(cell, LIGHT)
+        _format_cell(cell, value, bold=True, size=8.5, align=WD_ALIGN_PARAGRAPH.CENTER)
+    for instance in snapshot["instances"]:
+        cells = directories.add_row().cells
+        for column, value in enumerate(
+            [
+                instance["node_name"],
+                instance["install_dir"],
+                instance["data_dir"],
+                instance["log_dir"],
+                instance["config_dir"],
+            ]
+        ):
+            _format_cell(
+                cells[column],
+                value,
+                size=7.8,
+                align=WD_ALIGN_PARAGRAPH.CENTER if column == 0 else WD_ALIGN_PARAGRAPH.LEFT,
+            )
+    _set_table_geometry(directories, [900, 2115, 2115, 2115, 2115])
+    _set_table_borders(directories)
+
+    _add_heading(document, "5. 运维说明")
+    notes = [
+        ("证书", "平台为本次任务生成并分发共享的 Transport TLS 证书，证书文件位于各节点配置目录。"),
+        ("系统参数", "部署时会设置 vm.max_map_count，任务回滚时按本任务记录尝试恢复原值。"),
+        ("集群检查", "集群部署完成后已等待健康状态达到 yellow 或 green。"),
+        ("密码管理", "如需轮换 elastic 密码，请通过 Elasticsearch 安全 API 修改并重新保存交付记录。"),
+    ]
+    for label, text in notes:
+        paragraph = document.add_paragraph()
+        paragraph.paragraph_format.space_after = Pt(5)
+        _set_run_font(paragraph.add_run(f"{label}："), size=10, color=BLUE, bold=True)
+        _set_run_font(paragraph.add_run(text), size=10, color=INK)
+
+    temporary_path = output_path.with_suffix(".tmp.docx")
+    document.save(temporary_path)
+    os.replace(temporary_path, output_path)
+    return output_path
+
+
+def report_path_for(deployment_id: str, component: str = "redis") -> Path:
+    return Path(settings().reports_dir) / f"{component}-deployment-{deployment_id}.docx"

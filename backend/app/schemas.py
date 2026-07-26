@@ -127,17 +127,91 @@ class RedisDeploymentConfig(BaseModel):
         return self
 
 
+class ElasticsearchInstance(BaseModel):
+    host_id: str
+    http_port: int = Field(default=9200, ge=1024, le=55535)
+    transport_port: int = Field(default=9300, ge=1024, le=55535)
+    install_dir: str = "/opt/middleware/elasticsearch"
+    data_dir: str = "/data/elasticsearch/data"
+    log_dir: str = "/data/elasticsearch/logs"
+    config_dir: str = "/etc/middleware/elasticsearch"
+    node_name: str | None = None
+
+    @field_validator("install_dir", "data_dir", "log_dir", "config_dir")
+    @classmethod
+    def absolute_safe_path(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if not value.startswith("/") or value == "/" or ".." in path.parts:
+            raise ValueError("目录必须是非根目录的绝对路径，且不能包含 ..")
+        return value.rstrip("/")
+
+
+class ElasticsearchDeploymentConfig(BaseModel):
+    mode: DeploymentMode
+    instances: list[ElasticsearchInstance] = Field(min_length=1)
+    cluster_name: str = Field(default="cluster-es", min_length=1, max_length=80)
+    elastic_password: str = Field(min_length=6)
+    security_enabled: bool = True
+    http_cors_enabled: bool = True
+    heap_size: str | None = None
+    disk_watermark_low: str = "90%"
+    disk_watermark_high: str = "95%"
+    disk_watermark_flood_stage: str = "98%"
+
+    @model_validator(mode="after")
+    def validate_topology(self):
+        endpoints = []
+        for item in self.instances:
+            endpoints.append((item.host_id, item.http_port))
+            endpoints.append((item.host_id, item.transport_port))
+            if item.http_port == item.transport_port:
+                raise ValueError("同一 Elasticsearch 节点的 HTTP 端口和 Transport 端口不能相同")
+        if len(endpoints) != len(set(endpoints)):
+            raise ValueError("同一服务器上的 Elasticsearch HTTP 或 Transport 端口发生冲突")
+        paths_by_host: dict[str, list[PurePosixPath]] = {}
+        for item in self.instances:
+            paths_by_host.setdefault(item.host_id, []).extend(
+                PurePosixPath(value)
+                for value in (
+                    item.install_dir,
+                    item.data_dir,
+                    item.log_dir,
+                    item.config_dir,
+                )
+            )
+        for paths in paths_by_host.values():
+            for index, left in enumerate(paths):
+                for right in paths[index + 1 :]:
+                    if left == right or left in right.parents or right in left.parents:
+                        raise ValueError(
+                            f"同一服务器上的任务目录不能重复或互相嵌套：{left} 与 {right}"
+                        )
+        if self.mode == DeploymentMode.STANDALONE:
+            if len(self.instances) != 1:
+                raise ValueError("Elasticsearch 单机模式必须且只能配置一个节点")
+        else:
+            if len(self.instances) < 3:
+                raise ValueError("Elasticsearch 集群模式至少需要 3 个节点")
+        return self
+
+
 class DeploymentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     component: str
     package_id: str
     mode: DeploymentMode
-    config: RedisDeploymentConfig
+    config: RedisDeploymentConfig | ElasticsearchDeploymentConfig
 
     @model_validator(mode="after")
     def consistent_component_and_mode(self):
-        if self.component != "redis":
-            raise ValueError("当前版本仅实现 Redis 部署")
+        if self.component not in {"redis", "elasticsearch"}:
+            raise ValueError("当前版本仅实现 Redis 和 Elasticsearch 部署")
+        if self.component == "redis" and not isinstance(self.config, RedisDeploymentConfig):
+            raise ValueError("Redis 部署必须使用 Redis 配置")
+        if self.component == "elasticsearch" and not isinstance(
+            self.config, ElasticsearchDeploymentConfig
+        ):
+            raise ValueError("Elasticsearch 部署必须使用 Elasticsearch 配置")
         if self.mode != self.config.mode:
             raise ValueError("部署模式与配置不一致")
         return self

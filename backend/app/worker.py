@@ -66,7 +66,8 @@ def run_task(task_id: str) -> None:
             return
         db.commit()
 
-    add_log(task_id, "开始预检：SSH 密码、sudo、Python 3、端口、目录、编译依赖和 systemd")
+    component_label = "Elasticsearch" if package.component == "elasticsearch" else "Redis"
+    add_log(task_id, f"开始预检：{component_label} 目标服务器、端口、目录、系统参数和 systemd")
     try:
         deploy_result, rollback_result = call_ansible(
             task_id,
@@ -105,10 +106,15 @@ def run_task(task_id: str) -> None:
                 snapshot["completed_at"] = completed_at.strftime("%Y-%m-%d %H:%M:%S")
                 task.report_snapshot = snapshot
                 try:
-                    report_path = report_path_for(task.id)
+                    report_path = report_path_for(task.id, task.component)
                     build_report(
                         snapshot,
-                        redis_password=decrypt(config["redis_password"]),
+                        redis_password=decrypt(config["redis_password"])
+                        if task.component == "redis"
+                        else None,
+                        elastic_password=decrypt(config["elastic_password"])
+                        if task.component == "elasticsearch"
+                        else None,
                         output_path=report_path,
                         generated_at=completed_at,
                     )
@@ -132,9 +138,8 @@ def run_task(task_id: str) -> None:
                 TaskLog(
                     deployment_id=task_id,
                     message=(
-                        "部署成功：Redis 普通实例已启动"
-                        if task.mode.value == "standalone"
-                        else "部署成功：Redis Cluster 已创建"
+                        f"部署成功：{component_label} "
+                        + ("单机实例已启动" if task.mode.value == "standalone" else "集群已创建")
                     ),
                 )
             )
@@ -179,6 +184,30 @@ def fail(db, task: Deployment, message: str) -> None:
 
 
 def call_ansible(
+    task_id: str,
+    package: Package,
+    config: dict,
+    hosts_by_id: dict[str, Host],
+    rollback_only: bool = False,
+) -> tuple[int, int | None]:
+    if package.component == "elasticsearch":
+        return call_elasticsearch_ansible(
+            task_id,
+            package,
+            config,
+            hosts_by_id,
+            rollback_only=rollback_only,
+        )
+    return call_redis_ansible(
+        task_id,
+        package,
+        config,
+        hosts_by_id,
+        rollback_only=rollback_only,
+    )
+
+
+def call_redis_ansible(
     task_id: str,
     package: Package,
     config: dict,
@@ -299,6 +328,137 @@ def call_ansible(
             inventory_path,
             vars_path,
             Path(settings().ansible_dir) / "playbooks" / "redis_rollback.yml",
+            process_env,
+        )
+        return deploy_result, rollback_result
+
+
+def call_elasticsearch_ansible(
+    task_id: str,
+    package: Package,
+    config: dict,
+    hosts_by_id: dict[str, Host],
+    rollback_only: bool = False,
+) -> tuple[int, int | None]:
+    with tempfile.TemporaryDirectory(prefix="spmp-task-") as temp_dir:
+        root = Path(temp_dir)
+        inventory_hosts = {}
+        es_nodes = []
+        for index, instance in enumerate(config["instances"], start=1):
+            host = hosts_by_id[instance["host_id"]]
+            inventory_name = f"es_{index:03d}"
+            node_name = instance.get("node_name") or f"node-{index}"
+            connection = connection_inventory_vars(
+                address=host.address,
+                port=host.ssh_port,
+                user=host.ssh_user,
+                password=decrypt(host.ssh_password_encrypted),
+                use_sudo=host.use_sudo,
+                sudo_password=decrypt(host.sudo_password_encrypted)
+                if host.sudo_password_encrypted
+                else None,
+            )
+            connection.update(
+                {
+                    "es_instance_id": inventory_name,
+                    "es_node_name": node_name,
+                    "es_advertise_address": host.address,
+                    "es_http_port": instance["http_port"],
+                    "es_transport_port": instance["transport_port"],
+                    "es_install_path": instance["install_dir"],
+                    "es_data_path": instance["data_dir"],
+                    "es_log_path": instance["log_dir"],
+                    "es_config_path": instance["config_dir"],
+                }
+            )
+            inventory_hosts[inventory_name] = connection
+            es_nodes.append(
+                {
+                    "name": node_name,
+                    "address": host.address,
+                    "http_port": instance["http_port"],
+                    "transport_port": instance["transport_port"],
+                }
+            )
+
+        inventory = {"all": {"children": {"elasticsearch": {"hosts": inventory_hosts}}}}
+        inventory_path = root / "inventory.json"
+        inventory_path.write_text(json.dumps(inventory), encoding="utf-8")
+        os.chmod(inventory_path, 0o600)
+
+        extra_vars = {
+            "spmp_task_id": task_id,
+            "es_package_path": package.storage_path,
+            "es_package_type": package.package_type.value,
+            "es_deployment_mode": config["mode"],
+            "es_cluster_name": config["cluster_name"],
+            "es_nodes": es_nodes,
+            "es_elastic_password": decrypt(config["elastic_password"]),
+            "es_security_enabled": config["security_enabled"],
+            "es_http_cors_enabled": config["http_cors_enabled"],
+            "es_heap_size": config.get("heap_size"),
+            "es_disk_watermark_low": config["disk_watermark_low"],
+            "es_disk_watermark_high": config["disk_watermark_high"],
+            "es_disk_watermark_flood_stage": config["disk_watermark_flood_stage"],
+        }
+        vars_path = root / "vars.json"
+        vars_path.write_text(json.dumps(extra_vars), encoding="utf-8")
+        os.chmod(vars_path, 0o600)
+
+        process_env = os.environ.copy()
+        process_env["ANSIBLE_ROLES_PATH"] = str(Path(settings().ansible_dir) / "roles")
+        ssh_control_path_dir = root / "ssh-control"
+        ssh_control_path_dir.mkdir(mode=0o700)
+        process_env["ANSIBLE_SSH_CONTROL_PATH_DIR"] = str(ssh_control_path_dir)
+        process_env["ANSIBLE_SSH_ARGS"] = (
+            "-C -o ControlMaster=auto -o ControlPersist=15m"
+        )
+        if rollback_only:
+            rollback_result = stream_playbook(
+                task_id,
+                inventory_path,
+                vars_path,
+                Path(settings().ansible_dir) / "playbooks" / "elasticsearch_rollback.yml",
+                process_env,
+            )
+            return 1, rollback_result
+
+        preflight_result = stream_playbook(
+            task_id,
+            inventory_path,
+            vars_path,
+            Path(settings().ansible_dir) / "playbooks" / "elasticsearch_preflight.yml",
+            process_env,
+        )
+        if preflight_result != 0:
+            add_log(
+                task_id,
+                "Elasticsearch 预检未通过，平台确认尚未开始任何安装或配置变更，因此不执行回滚",
+                "ERROR",
+            )
+            return preflight_result, None
+
+        add_log(task_id, "全部节点预检通过，开始分发、安装和启动 Elasticsearch")
+        deploy_result = stream_playbook(
+            task_id,
+            inventory_path,
+            vars_path,
+            Path(settings().ansible_dir) / "playbooks" / "elasticsearch.yml",
+            process_env,
+        )
+        if deploy_result == 0:
+            return 0, 0
+        with SessionLocal() as db:
+            failed_task = db.get(Deployment, task_id)
+            if failed_task:
+                failed_task.status = TaskStatus.ROLLING_BACK
+                db.commit()
+        add_log(task_id, "开始执行本任务 Elasticsearch 精确资源清单回滚", "WARN")
+        rollback_result = stream_playbook(
+            task_id,
+            inventory_path,
+            vars_path,
+            Path(settings().ansible_dir) / "playbooks" / "elasticsearch_rollback.yml",
             process_env,
         )
         return deploy_result, rollback_result

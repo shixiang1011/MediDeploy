@@ -1,0 +1,30 @@
+cluster.name: {{ es_cluster_name }}
+node.name: {{ es_node_name }}
+path.data: {{ es_data_path }}
+path.logs: {{ es_log_path }}
+network.host: {{ es_advertise_address }}
+network.publish_host: {{ es_advertise_address }}
+http.port: {{ es_http_port }}
+transport.port: {{ es_transport_port }}
+node.roles: [ master, data, ingest ]
+bootstrap.memory_lock: false
+http.cors.enabled: {{ 'true' if es_http_cors_enabled else 'false' }}
+http.cors.allow-origin: "*"
+cluster.routing.allocation.disk.threshold_enabled: true
+cluster.routing.allocation.disk.watermark.low: {{ es_disk_watermark_low }}
+cluster.routing.allocation.disk.watermark.high: {{ es_disk_watermark_high }}
+cluster.routing.allocation.disk.watermark.flood_stage: {{ es_disk_watermark_flood_stage }}
+{% if es_deployment_mode == 'standalone' %}
+discovery.type: single-node
+{% else %}
+discovery.seed_hosts: [{% for node in es_nodes %}"{{ node.address }}:{{ node.transport_port }}"{% if not loop.last %}, {% endif %}{% endfor %}]
+cluster.initial_master_nodes: [{% for node in es_nodes %}"{{ node.name }}"{% if not loop.last %}, {% endif %}{% endfor %}]
+{% endif %}
+xpack.security.enabled: {{ 'true' if es_security_enabled else 'false' }}
+{% if es_security_enabled %}
+xpack.security.http.ssl.enabled: false
+xpack.security.transport.ssl.enabled: true
+xpack.security.transport.ssl.verification_mode: certificate
+xpack.security.transport.ssl.keystore.path: elastic-certificates.p12
+xpack.security.transport.ssl.truststore.path: elastic-certificates.p12
+{% endif %}

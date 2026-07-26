@@ -267,6 +267,75 @@ class StaticContractTests(unittest.TestCase):
         self.assertIn('"report_snapshot"', migration)
         self.assertIn("下载 Word 报告", (ROOT / "frontend" / "src" / "App.vue").read_text(encoding="utf-8"))
 
+    def test_elasticsearch_standalone_and_cluster_deployment_contract(self):
+        schemas = (ROOT / "backend" / "app" / "schemas.py").read_text(encoding="utf-8")
+        api = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+        worker = (ROOT / "backend" / "app" / "worker.py").read_text(encoding="utf-8")
+        frontend = (ROOT / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
+        report = (ROOT / "backend" / "app" / "report_generator.py").read_text(
+            encoding="utf-8"
+        )
+        playbooks = {
+            path.name: path.read_text(encoding="utf-8")
+            for path in (ROOT / "ansible" / "playbooks").glob("elasticsearch*.yml")
+        }
+        role_tasks = (
+            ROOT / "ansible" / "roles" / "elasticsearch" / "tasks" / "main.yml"
+        ).read_text(encoding="utf-8")
+        es_config = (
+            ROOT
+            / "ansible"
+            / "roles"
+            / "elasticsearch"
+            / "templates"
+            / "elasticsearch.yml.j2"
+        ).read_text(encoding="utf-8")
+        es_service = (
+            ROOT
+            / "ansible"
+            / "roles"
+            / "elasticsearch"
+            / "templates"
+            / "elasticsearch.service.j2"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("ElasticsearchDeploymentConfig", schemas)
+        self.assertIn("ElasticsearchInstance", schemas)
+        self.assertIn('"elasticsearch", "name": "Elasticsearch", "available": True', api)
+        self.assertIn('PackageType.BINARY', api)
+        self.assertIn('config["elastic_password"] = encrypt', api)
+        self.assertIn('safe_config.pop("elastic_password", None)', api)
+        self.assertIn('call_elasticsearch_ansible', worker)
+        self.assertIn('"elasticsearch_preflight.yml"', worker)
+        self.assertIn('"elasticsearch_rollback.yml"', worker)
+        self.assertIn("es_elastic_password", worker)
+        self.assertIn("Elasticsearch", frontend)
+        self.assertIn("elastic 密码", frontend)
+        self.assertIn("Transport 端口", frontend)
+        self.assertIn("availableWizardPackages", frontend)
+        self.assertIn("Elasticsearch 密码", report)
+        self.assertIn("_build_elasticsearch_report", report)
+
+        self.assertEqual(
+            set(playbooks),
+            {
+                "elasticsearch.yml",
+                "elasticsearch_preflight.yml",
+                "elasticsearch_rollback.yml",
+            },
+        )
+        self.assertIn("Require official binary Elasticsearch package", playbooks["elasticsearch_preflight.yml"])
+        self.assertIn("Verify Elasticsearch cluster reaches a usable health state", playbooks["elasticsearch.yml"])
+        self.assertIn("Restore previous vm.max_map_count value", playbooks["elasticsearch_rollback.yml"])
+        self.assertIn("elasticsearch-certutil", role_tasks)
+        self.assertIn("bootstrap.password", role_tasks)
+        self.assertIn("vm.max_map_count=655350", role_tasks)
+        self.assertIn("xpack.security.transport.ssl.enabled", es_config)
+        self.assertIn("discovery.seed_hosts", es_config)
+        self.assertIn("cluster.initial_master_nodes", es_config)
+        self.assertIn("ES_PATH_CONF", es_service)
+        self.assertIn("User={{ es_service_user }}", es_service)
+
 
 if __name__ == "__main__":
     unittest.main()

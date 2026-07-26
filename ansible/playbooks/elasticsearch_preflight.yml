@@ -1,0 +1,110 @@
+---
+- name: Preflight every Elasticsearch node before changing any target
+  hosts: elasticsearch
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Wait for SSH and Python to become reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 90
+        connect_timeout: 5
+        sleep: 5
+
+    - name: Collect minimum operating system facts
+      ansible.builtin.setup:
+        gather_subset:
+          - min
+
+    - name: Require x86_64 architecture
+      ansible.builtin.assert:
+        that: ansible_architecture in ['x86_64', 'amd64']
+        fail_msg: "当前仅支持 x86_64，目标节点 {{ inventory_hostname }} 架构不兼容"
+
+    - name: Require root privileges after optional sudo elevation
+      ansible.builtin.command: id -u
+      changed_when: false
+      register: effective_user
+
+    - name: Reject insufficient privileges
+      ansible.builtin.assert:
+        that: effective_user.stdout | trim == '0'
+        fail_msg: "目标节点 {{ inventory_hostname }} 未获得 root 或 sudo 权限"
+
+    - name: Check mandatory offline runtime dependencies
+      ansible.builtin.command: "sh -c 'command -v {{ item }}'"
+      changed_when: false
+      loop:
+        - python3
+        - tar
+        - ss
+        - setfacl
+        - tail
+        - systemctl
+        - pkill
+        - runuser
+        - sysctl
+
+    - name: Require official binary Elasticsearch package
+      ansible.builtin.assert:
+        that: es_package_type == 'binary'
+        fail_msg: "Elasticsearch 当前仅支持官方二进制 tar.gz/tgz 包"
+
+    - name: Verify uploaded package exists on control node
+      ansible.builtin.stat:
+        path: "{{ es_package_path }}"
+      delegate_to: localhost
+      become: false
+      register: package_file
+
+    - name: Reject missing uploaded package
+      ansible.builtin.assert:
+        that: package_file.stat.exists
+        fail_msg: "平台软件包存储中不存在所选 Elasticsearch 包"
+
+    - name: Derive task-owned service and marker
+      ansible.builtin.set_fact:
+        es_service_name: "spmp-es-{{ spmp_task_id[:8] }}-{{ es_instance_id }}"
+        es_service_user: "spmpe{{ (spmp_task_id | regex_replace('-', ''))[:8] }}{{ es_instance_id | regex_replace('[^0-9]', '') }}"
+        es_marker_path: "{{ es_config_path }}/.spmp-managed-{{ spmp_task_id }}-{{ es_instance_id }}"
+
+    - name: Reject an existing service with the same task identity
+      ansible.builtin.command: "systemctl cat {{ es_service_name }}"
+      changed_when: false
+      failed_when: false
+      register: existing_service
+
+    - name: Require unused service identity
+      ansible.builtin.assert:
+        that: existing_service.rc != 0
+        fail_msg: "服务 {{ es_service_name }} 已存在，拒绝覆盖"
+
+    - name: Check all configured target paths
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ es_install_path }}"
+        - "{{ es_data_path }}"
+        - "{{ es_log_path }}"
+        - "{{ es_config_path }}"
+      register: target_paths
+
+    - name: Require every target path to be unused
+      ansible.builtin.assert:
+        that: not item.stat.exists
+        fail_msg: "目标路径 {{ item.item }} 已存在，拒绝覆盖"
+      loop: "{{ target_paths.results }}"
+
+    - name: Check whether required Elasticsearch ports are already listening
+      ansible.builtin.shell: "ss -ltn | grep -Eq '[:.]{{ item }}([[:space:]]|$)'"
+      changed_when: false
+      failed_when: false
+      loop:
+        - "{{ es_http_port | int }}"
+        - "{{ es_transport_port | int }}"
+      register: es_ports_in_use
+
+    - name: Require every HTTP and Transport port to be unused
+      ansible.builtin.assert:
+        that: item.rc != 0
+        fail_msg: "端口 {{ item.item }} 已被占用"
+      loop: "{{ es_ports_in_use.results }}"
