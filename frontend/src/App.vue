@@ -49,6 +49,9 @@ export default {
       hostTest: null,
       editingHostId: null,
       packageForm: emptyPackage(),
+      uploadProgress: 0,
+      uploadingPackageName: '',
+      refreshing: false,
       wizardOpen: false,
       wizardStep: 1,
       wizard: {
@@ -143,8 +146,13 @@ export default {
       this.token = ''
       this.user = null
     },
-    async refresh() {
+    async refresh(manual = false) {
       if (!this.token) return
+      const showRefreshEffect = manual === true
+      if (showRefreshEffect) {
+        this.refreshing = true
+        this.notice = ''
+      }
       try {
         this.user = await this.request('get', 'me')
         const [components, hosts, packages, deployments] = await Promise.all([
@@ -157,8 +165,11 @@ export default {
         this.hosts = hosts
         this.packages = packages
         this.deployments = deployments
+        if (showRefreshEffect) this.notice = '数据已刷新。'
       } catch (_) {
-        this.logout()
+        if (!showRefreshEffect) this.logout()
+      } finally {
+        if (showRefreshEffect) this.refreshing = false
       }
     },
     roleLabel(role) {
@@ -277,6 +288,8 @@ export default {
       }
       this.error = ''
       this.packageForm.file = file
+      this.uploadProgress = 0
+      this.uploadingPackageName = file.name
     },
     packageComponentChanged() {
       if (this.packageForm.component === 'elasticsearch') {
@@ -304,14 +317,30 @@ export default {
       const form = new FormData()
       form.append('file', this.packageForm.file, this.packageForm.file.name)
       this.busy = true
+      this.uploadProgress = 0
+      this.uploadingPackageName = this.packageForm.file.name
       try {
-        const item = await this.request('post', `packages?${query}`, form)
+        const item = await this.request('post', `packages?${query}`, form, {
+          onUploadProgress: (event) => {
+            if (event.total) {
+              this.uploadProgress = Math.min(99, Math.round((event.loaded * 100) / event.total))
+            } else if (event.loaded) {
+              this.uploadProgress = Math.max(this.uploadProgress, 5)
+            }
+          },
+        })
+        this.uploadProgress = 100
         this.packages.unshift(item)
         this.packageForm = emptyPackage()
-        this.notice = '软件包上传成功。'
+        this.uploadingPackageName = item.filename
+        this.notice = `软件包“${item.filename}”上传成功。`
       } catch (_) {
       } finally {
         this.busy = false
+        if (this.uploadProgress !== 100) {
+          this.uploadProgress = 0
+          this.uploadingPackageName = ''
+        }
       }
     },
     async searchPackages() {
@@ -671,7 +700,10 @@ export default {
     <section class="content">
       <header>
         <div><h1>SP MediDeploy</h1><p>统一管理软件包、服务器和中间件部署任务</p></div>
-        <button class="secondary" @click="refresh">刷新数据</button>
+        <button class="secondary refresh-button" :class="{refreshing}" :disabled="refreshing" @click="refresh(true)">
+          <span v-if="refreshing" class="spinner"></span>
+          {{ refreshing ? '刷新中...' : '刷新数据' }}
+        </button>
       </header>
       <p v-if="notice" class="notice">{{ notice }}</p>
       <p v-if="error" class="error">{{ error }}</p>
@@ -738,7 +770,14 @@ export default {
           <label>CPU 架构<select v-model="packageForm.architecture"><option value="x86_64">x86_64</option></select></label>
           <label>说明<textarea v-model="packageForm.description" placeholder="适用系统、编译参数或其他说明"></textarea></label>
           <label>软件包<input type="file" accept=".tar.gz,.tgz,.gz,application/gzip,application/x-gzip" required @change="choosePackageFile" /></label>
-          <button :disabled="busy || !canUploadPackage">上传软件包</button>
+          <div v-if="uploadingPackageName || uploadProgress" class="upload-progress">
+            <div class="upload-progress-meta">
+              <span>{{ uploadingPackageName || '软件包上传' }}</span>
+              <b>{{ uploadProgress }}%</b>
+            </div>
+            <div class="upload-progress-track"><i :style="{ width: `${uploadProgress}%` }"></i></div>
+          </div>
+          <button :disabled="busy || !canUploadPackage">{{ busy && uploadingPackageName ? '上传中...' : '上传软件包' }}</button>
         </form>
         <div class="panel">
           <div class="panel-toolbar">
@@ -912,6 +951,15 @@ export default {
 .completion-icon.success{background:#e2f7e9;color:#168046}
 .panel-toolbar{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}
 .panel-toolbar p{margin:7px 0 0;color:#77849b;font-size:12px}
+.refresh-button{display:inline-flex;align-items:center;gap:8px;min-width:112px;justify-content:center;transition:transform .18s ease,box-shadow .18s ease,background .18s ease}
+.refresh-button.refreshing{background:#e9f1ff;color:#1f5fbf;box-shadow:0 0 0 4px #3b78e722;animation:refreshPulse 1s ease-in-out infinite}
+.spinner{width:14px;height:14px;border:2px solid #9ebcf2;border-top-color:#2f66d0;border-radius:50%;animation:spin .75s linear infinite}
+.upload-progress{border:1px solid #d8e3f5;background:#f6f9ff;border-radius:12px;padding:12px 13px;box-shadow:inset 0 1px 0 #fff}
+.upload-progress-meta{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:9px;color:#516178;font-size:12px}
+.upload-progress-meta span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.upload-progress-meta b{color:#2f66d0}
+.upload-progress-track{height:9px;border-radius:999px;background:#e2eaf7;overflow:hidden}
+.upload-progress-track i{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,#3b78e7,#30b887);transition:width .2s ease}
 .search-box{display:flex;align-items:center;gap:7px;min-width:310px}
 .search-box input{min-width:180px}
 .search-box button{white-space:nowrap}
@@ -920,5 +968,7 @@ export default {
 .danger-link:hover{color:#fff;background:#c53232}
 .report-link{color:#19693b;background:#e8f6ed}
 .report-link:hover{color:#fff;background:#237b49}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes refreshPulse{50%{transform:translateY(-1px);box-shadow:0 0 0 7px #3b78e712}}
 @media(max-width:1000px){.execution-shell{padding:20px}.execution-header{align-items:flex-start;gap:15px}.execution-progress{grid-template-columns:1fr}.execution-log{max-height:none}.panel-toolbar{flex-direction:column}.search-box{min-width:0;width:100%;flex-wrap:wrap}.search-box input{flex:1}.table-actions{min-width:150px}}
 </style>

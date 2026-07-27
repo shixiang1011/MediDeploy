@@ -76,7 +76,20 @@ class StaticContractTests(unittest.TestCase):
         self.assertIn('accept=".tar.gz,.tgz,.gz,application/gzip,application/x-gzip"', frontend)
         self.assertIn("name.endsWith('.tar.gz') || name.endsWith('.tgz')", frontend)
         self.assertIn("filename.endsWith('.tar.gz') || filename.endsWith('.tgz')", frontend)
+        self.assertIn("uploadProgress", frontend)
+        self.assertIn("onUploadProgress", frontend)
+        self.assertIn("upload-progress-track", frontend)
+        self.assertIn("上传成功", frontend)
         self.assertNotIn("sha256", models + api.lower())
+
+    def test_manual_refresh_has_visible_feedback(self):
+        frontend = (ROOT / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
+        self.assertIn("refreshing: false", frontend)
+        self.assertIn("async refresh(manual = false)", frontend)
+        self.assertIn('@click="refresh(true)"', frontend)
+        self.assertIn("刷新中...", frontend)
+        self.assertIn("spinner", frontend)
+        self.assertIn("refreshPulse", frontend)
 
     def test_redis_playbook_preflights_before_install_and_supports_binary(self):
         playbook = (ROOT / "ansible" / "playbooks" / "redis.yml").read_text(encoding="utf-8")
