@@ -227,6 +227,15 @@ class StaticContractTests(unittest.TestCase):
         self.assertIn("es_heap_size | default('', true) | length > 0", tasks)
         self.assertNotIn("es_heap_size | default('') | length > 0", tasks)
 
+    def test_elasticsearch_keystore_is_readable_by_service_user(self):
+        tasks = (
+            ROOT / "ansible" / "roles" / "elasticsearch" / "tasks" / "main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Ensure Elasticsearch keystore is owned by the service user", tasks)
+        self.assertIn('path: "{{ es_config_path }}/elasticsearch.keystore"', tasks)
+        self.assertIn('owner: "{{ es_service_user }}"', tasks)
+        self.assertIn("mode: '0600'", tasks)
+
     def test_failed_tasks_can_retry_exact_rollback_before_redeployment(self):
         models = (ROOT / "backend" / "app" / "models.py").read_text(encoding="utf-8")
         api = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")

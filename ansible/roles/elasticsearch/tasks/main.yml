@@ -243,6 +243,14 @@
   no_log: true
   when: es_security_enabled | bool
 
+- name: Ensure Elasticsearch keystore is owned by the service user
+  ansible.builtin.file:
+    path: "{{ es_config_path }}/elasticsearch.keystore"
+    owner: "{{ es_service_user }}"
+    group: "{{ es_service_user }}"
+    mode: '0600'
+  when: es_security_enabled | bool
+
 - name: Install task-owned systemd unit
   ansible.builtin.template:
     src: elasticsearch.service.j2
