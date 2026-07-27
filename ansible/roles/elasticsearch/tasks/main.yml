@@ -201,6 +201,17 @@
     owner: "{{ es_service_user }}"
     group: "{{ es_service_user }}"
     mode: '0640'
+  when: custom_elasticsearch_yml | default('', true) | length == 0
+
+- name: Write user-provided Elasticsearch configuration with highest priority
+  ansible.builtin.copy:
+    content: "{{ custom_elasticsearch_yml }}"
+    dest: "{{ es_config_path }}/elasticsearch.yml"
+    owner: "{{ es_service_user }}"
+    group: "{{ es_service_user }}"
+    mode: '0640'
+  no_log: true
+  when: custom_elasticsearch_yml | default('', true) | length > 0
 
 - name: Create JVM options overlay directory
   ansible.builtin.file:

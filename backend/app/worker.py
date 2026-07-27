@@ -369,6 +369,7 @@ def call_elasticsearch_ansible(
                     "es_data_path": instance["data_dir"],
                     "es_log_path": instance["log_dir"],
                     "es_config_path": instance["config_dir"],
+                    "custom_elasticsearch_yml": instance.get("custom_elasticsearch_yml") or "",
                 }
             )
             inventory_hosts[inventory_name] = connection

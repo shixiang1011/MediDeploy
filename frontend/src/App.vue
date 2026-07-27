@@ -383,6 +383,7 @@ export default {
           data_dir: `/data/elasticsearch/${httpPort}/data`,
           log_dir: `/data/elasticsearch/${httpPort}/logs`,
           config_dir: `/etc/middleware/elasticsearch/${httpPort}`,
+          custom_elasticsearch_yml: '',
         }
       }
       const port = 6379 + index
@@ -435,10 +436,27 @@ export default {
     previousWizardStep() {
       if (this.wizardStep > 1) this.wizardStep -= 1
     },
+    importElasticsearchConfig(event, instance) {
+      const file = event.target.files[0]
+      if (!file) return
+      const reader = new FileReader()
+      reader.onload = () => {
+        instance.custom_elasticsearch_yml = String(reader.result || '')
+        this.notice = `已导入 ${file.name}，提交部署时会优先使用该 elasticsearch.yml。`
+      }
+      reader.onerror = () => {
+        this.error = `读取 ${file.name} 失败，请检查文件后重试。`
+      }
+      reader.readAsText(file, 'utf-8')
+      event.target.value = ''
+    },
     async submitDeployment() {
       const config = this.isElasticsearchWizard ? {
         mode: this.wizard.mode,
-        instances: this.wizard.instances.map((item) => ({ ...item })),
+        instances: this.wizard.instances.map((item) => ({
+          ...item,
+          custom_elasticsearch_yml: item.custom_elasticsearch_yml || null,
+        })),
         cluster_name: this.wizard.cluster_name,
         elastic_password: this.wizard.elastic_password,
         security_enabled: this.wizard.security_enabled,
@@ -870,6 +888,16 @@ export default {
               <textarea v-model="instance.custom_redis_conf" rows="10" placeholder="port 6379&#10;cluster-enabled yes&#10;..."></textarea>
             </details>
           </div>
+          <div v-if="isElasticsearchWizard" class="instance-configs">
+            <details v-for="(instance, index) in wizard.instances" :key="index">
+              <summary>节点 {{ index + 1 }} · {{ hostName(instance.host_id) }}:{{ instance.http_port }} 的 elasticsearch.yml</summary>
+              <p class="muted">留空时使用平台默认配置；导入或填写后完全使用此节点的自定义 elasticsearch.yml。请确保其中的 network.host、http.port、transport.port、path.data、path.logs 与上一步配置一致。</p>
+              <label class="file-import">导入 elasticsearch.yml
+                <input type="file" accept=".yml,.yaml,text/yaml,text/plain" @change="importElasticsearchConfig($event, instance)" />
+              </label>
+              <textarea v-model="instance.custom_elasticsearch_yml" rows="12" placeholder="cluster.name: cluster-es&#10;node.name: node-1&#10;path.data: /data/elasticsearch/9200/data&#10;path.logs: /data/elasticsearch/9200/logs&#10;network.host: 192.168.0.206&#10;http.port: 9200&#10;transport.port: 9300&#10;discovery.type: single-node&#10;..."></textarea>
+            </details>
+          </div>
         </div>
 
         <div v-if="wizardStep === 4" class="panel review wizard-panel">
@@ -960,6 +988,9 @@ export default {
 .upload-progress-meta b{color:#2f66d0}
 .upload-progress-track{height:9px;border-radius:999px;background:#e2eaf7;overflow:hidden}
 .upload-progress-track i{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,#3b78e7,#30b887);transition:width .2s ease}
+.file-import{display:inline-flex!important;align-items:center;justify-content:center;width:max-content;margin:8px 0 10px;padding:8px 12px;border:1px solid #cbd8ec;border-radius:10px;background:#f7faff;color:#2f66d0;font-size:12px;font-weight:800;cursor:pointer}
+.file-import:hover{background:#eaf2ff;border-color:#9ebcf2}
+.file-import input{display:none}
 .search-box{display:flex;align-items:center;gap:7px;min-width:310px}
 .search-box input{min-width:180px}
 .search-box button{white-space:nowrap}

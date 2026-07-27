@@ -136,6 +136,7 @@ class ElasticsearchInstance(BaseModel):
     log_dir: str = "/data/elasticsearch/logs"
     config_dir: str = "/etc/middleware/elasticsearch"
     node_name: str | None = None
+    custom_elasticsearch_yml: str | None = None
 
     @field_validator("install_dir", "data_dir", "log_dir", "config_dir")
     @classmethod
