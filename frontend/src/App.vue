@@ -263,7 +263,20 @@ export default {
       await this.searchHosts()
     },
     choosePackageFile(event) {
-      this.packageForm.file = event.target.files[0]
+      const file = event.target.files[0]
+      if (!file) {
+        this.packageForm.file = null
+        return
+      }
+      const name = file.name.toLowerCase()
+      if (!(name.endsWith('.tar.gz') || name.endsWith('.tgz'))) {
+        this.packageForm.file = null
+        event.target.value = ''
+        this.error = '仅支持上传 .tar.gz 或 .tgz 软件包，当前文件名不符合要求。'
+        return
+      }
+      this.error = ''
+      this.packageForm.file = file
     },
     packageComponentChanged() {
       if (this.packageForm.component === 'elasticsearch') {
@@ -276,6 +289,11 @@ export default {
         this.error = '请选择 .tar.gz 或 .tgz 软件包。'
         return
       }
+      const filename = this.packageForm.file.name.toLowerCase()
+      if (!(filename.endsWith('.tar.gz') || filename.endsWith('.tgz'))) {
+        this.error = '仅支持上传 .tar.gz 或 .tgz 软件包，当前文件名不符合要求。'
+        return
+      }
       const query = new URLSearchParams({
         component: this.packageForm.component,
         version: this.packageForm.version,
@@ -284,7 +302,7 @@ export default {
         description: this.packageForm.description,
       })
       const form = new FormData()
-      form.append('file', this.packageForm.file)
+      form.append('file', this.packageForm.file, this.packageForm.file.name)
       this.busy = true
       try {
         const item = await this.request('post', `packages?${query}`, form)
@@ -719,7 +737,7 @@ export default {
           </div>
           <label>CPU 架构<select v-model="packageForm.architecture"><option value="x86_64">x86_64</option></select></label>
           <label>说明<textarea v-model="packageForm.description" placeholder="适用系统、编译参数或其他说明"></textarea></label>
-          <label>软件包<input type="file" accept=".tar.gz,.tgz" required @change="choosePackageFile" /></label>
+          <label>软件包<input type="file" accept=".tar.gz,.tgz,.gz,application/gzip,application/x-gzip" required @change="choosePackageFile" /></label>
           <button :disabled="busy || !canUploadPackage">上传软件包</button>
         </form>
         <div class="panel">

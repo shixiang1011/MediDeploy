@@ -25,6 +25,8 @@ services:
     environment:
       DATABASE_URL: mysql+pymysql://${MYSQL_USER:-spmp}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-spmp}
       PACKAGES_DIR: /opt/spmp/packages
+      UPLOAD_TMP_DIR: /opt/spmp/packages/tmp
+      TMPDIR: /opt/spmp/packages/tmp
       REPORTS_DIR: /opt/spmp/reports
       ANSIBLE_DIR: /opt/spmp/ansible
     volumes:
@@ -48,6 +50,8 @@ services:
     environment:
       DATABASE_URL: mysql+pymysql://${MYSQL_USER:-spmp}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-spmp}
       PACKAGES_DIR: /opt/spmp/packages
+      UPLOAD_TMP_DIR: /opt/spmp/packages/tmp
+      TMPDIR: /opt/spmp/packages/tmp
       REPORTS_DIR: /opt/spmp/reports
       ANSIBLE_DIR: /opt/spmp/ansible
     volumes:

@@ -64,9 +64,18 @@ class StaticContractTests(unittest.TestCase):
     def test_package_repository_supports_source_and_binary_tarballs(self):
         models = (ROOT / "backend" / "app" / "models.py").read_text(encoding="utf-8")
         api = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+        config = (ROOT / "backend" / "app" / "config.py").read_text(encoding="utf-8")
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        frontend = (ROOT / "frontend" / "src" / "App.vue").read_text(encoding="utf-8")
         self.assertIn('SOURCE = "source"', models)
         self.assertIn('BINARY = "binary"', models)
         self.assertIn('(".tar.gz", ".tgz")', api)
+        self.assertIn('upload_tmp_dir: str = "/opt/spmp/packages/tmp"', config)
+        self.assertIn('os.environ.setdefault("TMPDIR"', api)
+        self.assertIn("TMPDIR: /opt/spmp/packages/tmp", compose)
+        self.assertIn('accept=".tar.gz,.tgz,.gz,application/gzip,application/x-gzip"', frontend)
+        self.assertIn("name.endsWith('.tar.gz') || name.endsWith('.tgz')", frontend)
+        self.assertIn("filename.endsWith('.tar.gz') || filename.endsWith('.tgz')", frontend)
         self.assertNotIn("sha256", models + api.lower())
 
     def test_redis_playbook_preflights_before_install_and_supports_binary(self):

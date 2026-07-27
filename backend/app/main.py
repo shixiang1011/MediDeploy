@@ -1,4 +1,5 @@
 from datetime import datetime
+import os
 from pathlib import Path
 from uuid import uuid4
 
@@ -83,7 +84,11 @@ def bootstrap() -> None:
         elif not admin.tenant_id:
             admin.tenant_id = tenant.id
         db.commit()
-    Path(settings().packages_dir).mkdir(parents=True, exist_ok=True)
+    package_root = Path(settings().packages_dir)
+    package_root.mkdir(parents=True, exist_ok=True)
+    upload_tmp_dir = Path(settings().upload_tmp_dir)
+    upload_tmp_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("TMPDIR", str(upload_tmp_dir))
 
 
 def audit(
