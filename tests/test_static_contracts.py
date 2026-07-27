@@ -236,6 +236,19 @@ class StaticContractTests(unittest.TestCase):
         self.assertIn('owner: "{{ es_service_user }}"', tasks)
         self.assertIn("mode: '0600'", tasks)
 
+    def test_elasticsearch_checks_use_configured_network_address(self):
+        tasks = (
+            ROOT / "ansible" / "roles" / "elasticsearch" / "tasks" / "main.yml"
+        ).read_text(encoding="utf-8")
+        playbook = (ROOT / "ansible" / "playbooks" / "elasticsearch.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Wait for Elasticsearch HTTP port on the configured network address", tasks)
+        self.assertIn('host: "{{ es_advertise_address }}"', tasks)
+        self.assertIn('ES_URL: "http://{{ es_advertise_address }}:{{ es_http_port }}"', playbook)
+        self.assertNotIn('host: "127.0.0.1"', tasks)
+        self.assertNotIn('ES_URL: "http://127.0.0.1:{{ es_http_port }}"', playbook)
+
     def test_failed_tasks_can_retry_exact_rollback_before_redeployment(self):
         models = (ROOT / "backend" / "app" / "models.py").read_text(encoding="utf-8")
         api = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")

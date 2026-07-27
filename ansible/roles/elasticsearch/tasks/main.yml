@@ -266,9 +266,9 @@
         state: started
         daemon_reload: true
 
-    - name: Wait for Elasticsearch HTTP port on the target loopback interface
+    - name: Wait for Elasticsearch HTTP port on the configured network address
       ansible.builtin.wait_for:
-        host: "127.0.0.1"
+        host: "{{ es_advertise_address }}"
         port: "{{ es_http_port }}"
         timeout: 90
   rescue:

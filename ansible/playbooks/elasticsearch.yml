@@ -34,7 +34,7 @@
                     time.sleep(5);
             raise SystemExit(str(last))
       environment:
-        ES_URL: "http://127.0.0.1:{{ es_http_port }}"
+        ES_URL: "http://{{ es_advertise_address }}:{{ es_http_port }}"
         ES_PASSWORD: "{{ es_elastic_password }}"
       changed_when: false
       no_log: true
@@ -67,7 +67,7 @@
             print(json.dumps({'cluster_name': payload.get('cluster_name'), 'status': status, 'nodes': payload.get('number_of_nodes')}, ensure_ascii=False));
             sys.exit(0 if status in ('yellow', 'green') else 1)
       environment:
-        ES_URL: "http://127.0.0.1:{{ es_http_port }}"
+        ES_URL: "http://{{ es_advertise_address }}:{{ es_http_port }}"
         ES_PASSWORD: "{{ es_elastic_password if es_security_enabled | bool else '' }}"
       changed_when: false
       no_log: true
