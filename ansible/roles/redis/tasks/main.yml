@@ -198,7 +198,7 @@
     group: "{{ redis_service_user }}"
     mode: '0640'
   no_log: true
-  when: custom_redis_conf | default('') | length == 0
+  when: custom_redis_conf | default('', true) | length == 0
 
 - name: Write user-provided Redis configuration with highest priority
   ansible.builtin.copy:
@@ -208,7 +208,7 @@
     group: "{{ redis_service_user }}"
     mode: '0640'
   no_log: true
-  when: custom_redis_conf | default('') | length > 0
+  when: custom_redis_conf | default('', true) | length > 0
 
 - name: Install task-owned systemd unit
   ansible.builtin.template:

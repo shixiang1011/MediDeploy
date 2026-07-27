@@ -116,6 +116,8 @@ class StaticContractTests(unittest.TestCase):
         self.assertIn("Grant only this Redis service user traversal", tasks)
         self.assertIn("Start Redis source build (progress is checked every 10 seconds)", tasks)
         self.assertIn("Wait for Redis source build (30 minute limit)", tasks)
+        self.assertIn("custom_redis_conf | default('', true) | length == 0", tasks)
+        self.assertIn("custom_redis_conf | default('', true) | length > 0", tasks)
         self.assertIn("- runuser", tasks)
         self.assertEqual(tasks.count('ansible_async_dir: "{{ redis_install_path }}/.ansible_async"'), 2)
         self.assertIn("async: 1800", tasks)
@@ -216,6 +218,14 @@ class StaticContractTests(unittest.TestCase):
             / "20260724_0003_rollback_queued_status.py"
         ).read_text(encoding="utf-8")
         self.assertIn('"ROLLBACK_QUEUED"', rollback_migration)
+
+    def test_elasticsearch_optional_heap_is_null_safe(self):
+        tasks = (
+            ROOT / "ansible" / "roles" / "elasticsearch" / "tasks" / "main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Write JVM heap settings when configured", tasks)
+        self.assertIn("es_heap_size | default('', true) | length > 0", tasks)
+        self.assertNotIn("es_heap_size | default('') | length > 0", tasks)
 
     def test_failed_tasks_can_retry_exact_rollback_before_redeployment(self):
         models = (ROOT / "backend" / "app" / "models.py").read_text(encoding="utf-8")

@@ -217,7 +217,7 @@
     owner: "{{ es_service_user }}"
     group: "{{ es_service_user }}"
     mode: '0640'
-  when: es_heap_size | default('') | length > 0
+  when: es_heap_size | default('', true) | length > 0
 
 - name: Create Elasticsearch keystore
   ansible.builtin.command:
