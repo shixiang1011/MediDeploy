@@ -249,6 +249,17 @@ class StaticContractTests(unittest.TestCase):
         self.assertNotIn('host: "127.0.0.1"', tasks)
         self.assertNotIn('ES_URL: "http://127.0.0.1:{{ es_http_port }}"', playbook)
 
+    def test_elasticsearch_inline_python_keeps_newlines_and_sanitized_errors(self):
+        playbook = (ROOT / "ansible" / "playbooks" / "elasticsearch.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("- |\n            import base64", playbook)
+        self.assertIn("for attempt in range(1, 31):", playbook)
+        self.assertIn("failed to set elastic password through bootstrap password", playbook)
+        self.assertIn("urllib.error.HTTPError", playbook)
+        self.assertNotIn("import base64, json, os, sys, time, urllib.request;", playbook)
+        self.assertNotIn("no_log: true", playbook)
+
     def test_failed_tasks_can_retry_exact_rollback_before_redeployment(self):
         models = (ROOT / "backend" / "app" / "models.py").read_text(encoding="utf-8")
         api = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
